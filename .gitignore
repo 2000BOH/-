@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# build
+dist/
+dist-ssr/
+
+# local env (secrets)
+.env
+.env.local
+.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+
+# editor (optional — remove .vscode line if you want to commit settings)
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# OS
+Thumbs.db
+.DS_Store
