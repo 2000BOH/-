@@ -582,12 +582,6 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
         </div>
       </div>
 
-      {readOnly ? (
-        <div style={{ background: "#fef3c7", border: "1px solid #f59e0b", padding: "10px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, color: "#92400e" }}>
-          저장본 보기 중입니다. 추가 보고 편집·저장은 「현재 데이터」 모드에서 이용하세요.
-        </div>
-      ) : null}
-
       {displayContentOnly ? (
         <>
           {!readOnly ? (

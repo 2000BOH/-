@@ -648,15 +648,14 @@ export default function App() {
       ...data,
       ...e.snapshot,
       reportSnapshots: data.reportSnapshots,
-      /* 스냅샷의 additionalReports가 최근 저장을 덮어쓰지 않도록, 항상 현재 data가 우선 */
-      additionalReports: { ...(e.snapshot.additionalReports || {}), ...(data.additionalReports || {}) },
+      /* 추가 보고: 선택한 저장 주차 스냅샷에 들어 있던 내용만 표시 (현재 편집본과 섞지 않음) */
+      additionalReports: { ...(e.snapshot.additionalReports || {}) },
     };
   }, [data, snapshotWeekKey]);
   if (!data || !effectiveData) return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>로딩 중...</div>;
 
   const tabs = [{ key: "dashboard", label: "대시보드", icon: "📊" }, { key: "rooms", label: "객실현황", icon: "🏨" }, { key: "contracts", label: "계약관리", icon: "📝" }, { key: "report", label: "보고서", icon: "📄" }, { key: "additional", label: "추가 보고", icon: "📑" }];
   const snapReading = !!snapshotWeekKey;
-  const snapLabel = snapshotWeekKey ? formatKoMonthWeekLabel(snapshotWeekKey) : "";
   const additionalWeekKey = getWeekStr(effectiveData.reportDate);
   const additionalWeekLabel = additionalWeekKey ? formatKoMonthWeekLabel(additionalWeekKey) : "";
 
@@ -701,7 +700,7 @@ export default function App() {
                 <span style={{ fontSize: "clamp(15px, 2vw, 22px)", fontWeight: 500, letterSpacing: "0.02em", lineHeight: 1.35, color: "#fef9c3", textShadow: "0 1px 3px rgba(0,0,0,.35)", fontFamily: "'Segoe Script','Brush Script MT','Apple Chancery','Nanum Pen Script','Malgun Pen Script',cursive" }}>숙박유치는 선택이 아니라 생존이다.</span>
               </div>
             </div>
-            <div style={{ fontSize: 12, opacity: .85, textAlign: "right", justifySelf: "end", whiteSpace: "nowrap" }}>기준일 : {effectiveData.reportDate}{snapReading ? <span style={{ marginLeft: 8, color: "#fbbf24" }}>(저장본)</span> : null}</div>
+            <div style={{ fontSize: 12, opacity: .85, textAlign: "right", justifySelf: "end", whiteSpace: "nowrap" }}>기준일 : {effectiveData.reportDate}</div>
           </div>
           <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.15)", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
             <button type="button" onClick={() => setSnapshotWeekKey(null)} style={{ background: "#f8fafc", color: "#0f172a", border: "1px solid #cbd5e1", padding: "6px 14px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 800 }}>현재 데이터</button>
@@ -716,27 +715,6 @@ export default function App() {
             </label>
             {!snapReading ? <button type="button" onClick={saveWeeklyReportSnapshot} style={{ background: "#16a34a", color: "#fff", border: "none", padding: "7px 16px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 700 }}>💾 저장</button> : null}
           </div>
-          {snapReading ? (
-            <div
-              role="status"
-              style={{
-                marginTop: 10,
-                padding: "10px 14px",
-                borderRadius: 8,
-                background: "rgba(251,191,36,0.18)",
-                border: "1px solid rgba(251,191,36,0.45)",
-                color: "#fef08a",
-                fontSize: 13,
-                fontWeight: 700,
-                lineHeight: 1.45,
-                width: "100%",
-                boxSizing: "border-box",
-              }}
-            >
-              {snapLabel} 저장본 — 모든 탭에 동일 적용
-              <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600, color: "#fecaca" }}>저장본 보기 중에는 새 스냅샷 저장 불가</div>
-            </div>
-          ) : null}
         </header>
         <nav style={{ padding: "10px 24px 0", display: "flex", flexWrap: "wrap", gap: 6, rowGap: 4, background: "#f1f5f9" }}>
           {tabs.map(t => <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{ padding: "9px 18px", borderRadius: "10px 10px 0 0", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, background: tab === t.key ? "#fff" : "transparent", color: tab === t.key ? "#0f172a" : "#64748b", borderBottom: tab === t.key ? "2px solid #3b82f6" : "2px solid transparent", whiteSpace: "nowrap" }}><span style={{ marginRight: 5 }}>{t.icon}</span>{t.label}</button>)}
@@ -752,7 +730,7 @@ export default function App() {
             <AdditionalReport
               data={effectiveData}
               onSave={savePartial}
-              readOnly={false}
+              readOnly={snapReading}
               weekKey={additionalWeekKey}
               weekLabel={additionalWeekLabel}
               onGoToReport={() => setTab("report")}
