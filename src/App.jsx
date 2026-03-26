@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
 import AdditionalReport, { RICH_PROSE_CSS } from "./AdditionalReport.jsx";
 
 const STORAGE_KEY = "jangbak-v8";
@@ -1267,6 +1267,9 @@ function ReportView({ data }) {
   const [ptMode, setPtMode] = useState(false);
   const [ptSlideIndex, setPtSlideIndex] = useState(0);
   const [ptHover, setPtHover] = useState(null);
+  /** PT: 왼쪽/오른쪽 끝에 있을 때만 컨트롤 표시 */
+  const [ptEdgeZone, setPtEdgeZone] = useState(null);
+  const PT_EDGE_PX = 72;
   const { rooms, contracts, daewon, prevRooms, notes, reportDate, roomList } = data;
   const dw = daewon || initData.daewon;
   const prev = prevRooms || initData.prevRooms;
@@ -1629,6 +1632,36 @@ function ReportView({ data }) {
     };
   }, [ptMode]);
 
+  useEffect(() => {
+    if (!ptMode) setPtEdgeZone(null);
+  }, [ptMode]);
+
+  useLayoutEffect(() => {
+    if (!ptMode) return;
+    const el = ptShellRef.current;
+    if (!el) return;
+    if (document.fullscreenElement === el || document.webkitFullscreenElement === el) return;
+    const p = el.requestFullscreen?.() ?? el.webkitRequestFullscreen?.();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  }, [ptMode]);
+
+  const onPtShellPointer = useCallback((e) => {
+    const shell = ptShellRef.current;
+    if (!shell) return;
+    const r = shell.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const w = r.width;
+    if (x < PT_EDGE_PX) setPtEdgeZone("left");
+    else if (x > w - PT_EDGE_PX) setPtEdgeZone("right");
+    else setPtEdgeZone(null);
+  }, []);
+
+  const ptCtrlFade = (show) => ({
+    opacity: show ? 0.88 : 0,
+    pointerEvents: show ? "auto" : "none",
+    transition: "opacity 0.22s ease",
+  });
+
   const reportInner = (
     <>
         <h1 style={{ textAlign: "center", fontSize: 20, fontWeight: 800, marginTop: 0, marginBottom: 10, letterSpacing: 2 }}>장기 숙박 유치 현황</h1>
@@ -1831,19 +1864,32 @@ function ReportView({ data }) {
       {!ptMode ? (
         <div className="rp report-page-row">
           <div className="no-print" style={{ display: "flex", flexDirection: "column", gap: 8, flexShrink: 0, width: 118, position: "sticky", top: 12, alignSelf: "flex-start" }}>
-            <button type="button" onClick={() => setPtMode(true)} style={{ background: "#0f172a", color: "#fff", border: "none", padding: "9px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 800, width: "100%", boxSizing: "border-box" }}>📺 PT</button>
+            <button
+              type="button"
+              onClick={() => setPtMode(true)}
+              style={{ background: "#0f172a", color: "#fff", border: "none", padding: "9px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 800, width: "100%", boxSizing: "border-box" }}
+            >
+              📺 PT
+            </button>
             <button type="button" onClick={() => window.print()} style={{ background: "#3b82f6", color: "#fff", border: "none", padding: "9px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700, width: "100%", boxSizing: "border-box" }}>🖨️ 인쇄</button>
           </div>
           <div ref={sheetRef} className="report-sheet" style={{ ...sheetBaseStyle, flex: 1, minWidth: 0 }}>{reportInner}</div>
         </div>
       ) : (
-        <div ref={ptShellRef} style={{ position: "fixed", inset: 0, zIndex: 99999, background: "linear-gradient(180deg,#0f172a 0%,#020617 100%)", overflow: "hidden", display: "flex", flexDirection: "row", alignItems: "stretch", justifyContent: "flex-start", padding: "10px 14px 20px 10px", boxSizing: "border-box", gap: 12 }}>
-          <div className="no-print" style={{ display: "flex", flexDirection: "column", gap: 22, flexShrink: 0, width: "min(76px, 12vw)", paddingLeft: 2, alignSelf: "center", justifyContent: "center" }}>
-            <button type="button" onClick={exitPt} style={{ background: "#334155", color: "#fff", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>닫기 (Esc)</button>
-            <button type="button" onClick={() => { const el = ptShellRef.current; if (el?.requestFullscreen) el.requestFullscreen().catch(() => {}); else if (el?.webkitRequestFullscreen) el.webkitRequestFullscreen(); }} style={{ background: "#2563eb", color: "#fff", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>⛶ 전체화면</button>
-            <button type="button" onClick={clearHighlighter} style={{ background: "#38bdf8", color: "#0f172a", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>형광 지우기</button>
-          </div>
-          <div style={{ flex: 1, minWidth: 0, position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <div
+          ref={ptShellRef}
+          onMouseMove={onPtShellPointer}
+          onMouseLeave={() => setPtEdgeZone(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 99999,
+            background: "linear-gradient(180deg,#0f172a 0%,#020617 100%)",
+            overflow: "hidden",
+            boxSizing: "border-box",
+          }}
+        >
+          <div style={{ position: "absolute", inset: 0, zIndex: 0, minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column", alignItems: "stretch", justifyContent: "center" }}>
             <div
               className="pt-slide-track"
               style={{
@@ -1857,7 +1903,7 @@ function ReportView({ data }) {
                 willChange: "transform",
               }}
             >
-              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "flex-start", alignItems: "flex-start", boxSizing: "border-box", padding: "0 8px 0 0" }}>
+              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", boxSizing: "border-box", padding: "0 12px" }}>
                 <div ref={ptWrapRef} style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
                   <div ref={sheetRef} className="rp report-sheet report-tv-pt" style={sheetPtStyle}>{reportInner}</div>
                   <canvas
@@ -1888,7 +1934,7 @@ function ReportView({ data }) {
                   />
                 </div>
               </div>
-              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", boxSizing: "border-box", padding: "0 0 0 8px" }}>
+              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", boxSizing: "border-box", padding: "0 12px" }}>
                 <div ref={ptWrapAdditionalRef} style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
                   <div className="rp report-tv-pt" style={{ ...sheetPtStyle, boxShadow: "0 8px 48px rgba(0,0,0,.35)" }}>
                     <style>{RICH_PROSE_CSS}</style>
@@ -1944,23 +1990,79 @@ function ReportView({ data }) {
                 </div>
               </div>
             </div>
-            {ptSlideIndex === 0 ? (
+          </div>
+          <div
+            className="no-print"
+            style={{
+              position: "absolute",
+              left: 10,
+              top: "50%",
+              transform: "translateY(-50%)",
+              zIndex: 60,
+              display: "flex",
+              flexDirection: "column",
+              gap: 14,
+              width: "min(76px, 12vw)",
+              ...ptCtrlFade(ptEdgeZone === "left"),
+            }}
+          >
+            {ptSlideIndex === 1 ? (
               <button
                 type="button"
-                className="no-print pt-pt-nav"
+                className="pt-pt-nav"
+                aria-label="이전: 보고서"
+                onClick={() => setPtSlideIndex(0)}
+                style={{
+                  borderRadius: 14,
+                  border: "2px solid rgba(148,163,184,0.45)",
+                  background: "rgba(15,23,42,0.88)",
+                  color: "#f8fafc",
+                  fontSize: 28,
+                  fontWeight: 200,
+                  cursor: "pointer",
+                  minHeight: 120,
+                  width: "100%",
+                  padding: 0,
+                  boxShadow: "0 4px 20px rgba(0,0,0,.3)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  lineHeight: 1,
+                }}
+              >
+                {"<"}
+              </button>
+            ) : null}
+            <button type="button" className="pt-pt-nav" onClick={exitPt} style={{ background: "#334155", color: "#fff", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>
+              닫기 (Esc)
+            </button>
+            <button type="button" className="pt-pt-nav" onClick={clearHighlighter} style={{ background: "#38bdf8", color: "#0f172a", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>
+              형광 지우기
+            </button>
+          </div>
+          {ptSlideIndex === 0 ? (
+            <div
+              className="no-print"
+              style={{
+                position: "absolute",
+                right: 10,
+                top: "50%",
+                transform: "translateY(-50%)",
+                zIndex: 60,
+                ...ptCtrlFade(ptEdgeZone === "right"),
+              }}
+            >
+              <button
+                type="button"
+                className="pt-pt-nav"
                 aria-label="다음: 추가 보고"
                 onClick={() => setPtSlideIndex(1)}
                 style={{
-                  position: "absolute",
-                  right: 12,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  zIndex: 40,
                   width: 52,
                   minHeight: 140,
                   borderRadius: 14,
-                  border: "2px solid rgba(148,163,184,0.5)",
-                  background: "rgba(15,23,42,0.92)",
+                  border: "2px solid rgba(148,163,184,0.45)",
+                  background: "rgba(15,23,42,0.88)",
                   color: "#f8fafc",
                   fontSize: 30,
                   fontWeight: 200,
@@ -1975,39 +2077,8 @@ function ReportView({ data }) {
               >
                 {">"}
               </button>
-            ) : (
-              <button
-                type="button"
-                className="no-print pt-pt-nav"
-                aria-label="이전: 보고서"
-                onClick={() => setPtSlideIndex(0)}
-                style={{
-                  position: "absolute",
-                  left: 12,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  zIndex: 40,
-                  width: 52,
-                  minHeight: 140,
-                  borderRadius: 14,
-                  border: "2px solid rgba(148,163,184,0.5)",
-                  background: "rgba(15,23,42,0.92)",
-                  color: "#f8fafc",
-                  fontSize: 30,
-                  fontWeight: 200,
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  lineHeight: 1,
-                  padding: 0,
-                  boxShadow: "0 4px 24px rgba(0,0,0,.35)",
-                }}
-              >
-                {"<"}
-              </button>
-            )}
-          </div>
+            </div>
+          ) : null}
           {ptHover ? (
             <div
               className="no-print"
