@@ -719,7 +719,7 @@ export default function App() {
             {snapReading ? <span style={{ color: "#fca5a5", fontSize: 11 }}>저장본 보기 중에는 새 스냅샷 저장 불가</span> : null}
           </div>
         </header>
-        <nav style={{ padding: "10px 24px 0", display: "flex", gap: 3, background: "#f1f5f9", overflowX: "auto" }}>
+        <nav style={{ padding: "10px 24px 0", display: "flex", flexWrap: "wrap", gap: 6, rowGap: 4, background: "#f1f5f9" }}>
           {tabs.map(t => <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{ padding: "9px 18px", borderRadius: "10px 10px 0 0", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, background: tab === t.key ? "#fff" : "transparent", color: tab === t.key ? "#0f172a" : "#64748b", borderBottom: tab === t.key ? "2px solid #3b82f6" : "2px solid transparent", whiteSpace: "nowrap" }}><span style={{ marginRight: 5 }}>{t.icon}</span>{t.label}</button>)}
         </nav>
       </div>
