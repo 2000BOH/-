@@ -714,10 +714,29 @@ export default function App() {
                 ))}
               </select>
             </label>
-            {snapReading ? <span style={{ color: "#fbbf24", fontSize: 12, fontWeight: 700 }}>{snapLabel} 저장본 — 모든 탭에 동일 적용</span> : null}
             {!snapReading ? <button type="button" onClick={saveWeeklyReportSnapshot} style={{ background: "#16a34a", color: "#fff", border: "none", padding: "7px 16px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 700 }}>💾 저장</button> : null}
-            {snapReading ? <span style={{ color: "#fca5a5", fontSize: 11 }}>저장본 보기 중에는 새 스냅샷 저장 불가</span> : null}
           </div>
+          {snapReading ? (
+            <div
+              role="status"
+              style={{
+                marginTop: 10,
+                padding: "10px 14px",
+                borderRadius: 8,
+                background: "rgba(251,191,36,0.18)",
+                border: "1px solid rgba(251,191,36,0.45)",
+                color: "#fef08a",
+                fontSize: 13,
+                fontWeight: 700,
+                lineHeight: 1.45,
+                width: "100%",
+                boxSizing: "border-box",
+              }}
+            >
+              {snapLabel} 저장본 — 모든 탭에 동일 적용
+              <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600, color: "#fecaca" }}>저장본 보기 중에는 새 스냅샷 저장 불가</div>
+            </div>
+          ) : null}
         </header>
         <nav style={{ padding: "10px 24px 0", display: "flex", flexWrap: "wrap", gap: 6, rowGap: 4, background: "#f1f5f9" }}>
           {tabs.map(t => <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{ padding: "9px 18px", borderRadius: "10px 10px 0 0", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, background: tab === t.key ? "#fff" : "transparent", color: tab === t.key ? "#0f172a" : "#64748b", borderBottom: tab === t.key ? "2px solid #3b82f6" : "2px solid transparent", whiteSpace: "nowrap" }}><span style={{ marginRight: 5 }}>{t.icon}</span>{t.label}</button>)}
