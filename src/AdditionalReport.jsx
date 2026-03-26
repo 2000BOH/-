@@ -279,7 +279,10 @@ export const RICH_PROSE_CSS = `
   }
   .ar-rich-prose pre:not([style]) code:not([style]) { padding: 0; background: none; font-size: inherit; }
   .ar-rich-prose hr:not([style]) { margin: 16px 0; border: none; border-top: 1px solid #e5e5e7; }
-  .ar-rich-prose img { max-width: 100%; height: auto; display: block; margin: 10px 0; }
+  .ar-rich-prose p.ar-img-line { margin: 10px 0; line-height: 0; }
+  .ar-rich-prose p.ar-img-line + p.ar-img-line { margin-top: 8px; }
+  .ar-rich-prose img { max-width: 100%; height: auto; vertical-align: middle; }
+  .ar-rich-prose p.ar-img-line img { display: inline-block; }
   .ar-rich-prose a:not([style]) { color: #2563eb; text-decoration: underline; }
   .ar-rich-input.ar-rich-prose[data-placeholder]:empty:before {
     content: attr(data-placeholder);
@@ -308,27 +311,42 @@ function normalizeLoadedPrompt(p) {
   return { id, html };
 }
 
+function getImgWidthPercent(img) {
+  const w = img?.style?.width;
+  const m = String(w || "").match(/(\d+(?:\.\d+)?)%/);
+  if (m) return Math.min(100, Math.max(10, Math.round(parseFloat(m[1]))));
+  return 85;
+}
+
+/** 이미지 줄: 정렬은 부모 p(text-align), 크기는 img width % */
 function insertImageAtSelection(container, dataUrl, onHtmlChange) {
   if (!container) return;
   container.focus();
   const img = document.createElement("img");
   img.src = dataUrl;
   img.alt = "";
+  img.style.width = "85%";
   img.style.maxWidth = "100%";
   img.style.height = "auto";
-  img.style.display = "block";
-  img.style.margin = "8px 0";
+  img.style.display = "inline-block";
+  img.style.verticalAlign = "middle";
+  const wrap = document.createElement("p");
+  wrap.className = "ar-img-line";
+  wrap.style.textAlign = "center";
+  wrap.style.margin = "10px 0";
+  wrap.style.lineHeight = "0";
+  wrap.appendChild(img);
   const sel = window.getSelection();
   if (sel && sel.rangeCount > 0 && container.contains(sel.anchorNode)) {
     const range = sel.getRangeAt(0);
     range.deleteContents();
-    range.insertNode(img);
-    range.setStartAfter(img);
+    range.insertNode(wrap);
+    range.setStartAfter(wrap);
     range.collapse(true);
     sel.removeAllRanges();
     sel.addRange(range);
   } else {
-    container.appendChild(img);
+    container.appendChild(wrap);
   }
   onHtmlChange(container.innerHTML);
 }
@@ -337,6 +355,8 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
   const ph = placeholder?.trim() ? placeholder.trim() : undefined;
   const ref = useRef(null);
   const skipRef = useRef(false);
+  const [pickedImg, setPickedImg] = useState(null);
+  const [imgBarRect, setImgBarRect] = useState(null);
 
   // inputKey가 바뀔 때만 DOM 동기화(주차·저장본 로드 등). html만 바뀌는 타이핑은 contentEditable에 맡겨 커서가 튀지 않게 함.
   useEffect(() => {
@@ -345,6 +365,7 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
     skipRef.current = true;
     el.innerHTML = html || "";
     skipRef.current = false;
+    setPickedImg(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- html은 키 변경 시점의 스냅샷만 반영
   }, [inputKey]);
 
@@ -352,6 +373,87 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
     if (skipRef.current) return;
     onChange(ref.current?.innerHTML ?? "");
   }, [onChange]);
+
+  const applyImgWidth = useCallback(
+    (pct) => {
+      if (!pickedImg || !ref.current) return;
+      pickedImg.style.width = `${pct}%`;
+      pickedImg.style.maxWidth = "100%";
+      pickedImg.style.height = "auto";
+      emit();
+    },
+    [pickedImg, emit]
+  );
+
+  const applyImgAlign = useCallback(
+    (align) => {
+      if (!pickedImg || !ref.current) return;
+      let p = pickedImg.closest("p.ar-img-line");
+      if (!p || !ref.current.contains(p)) {
+        p = document.createElement("p");
+        p.className = "ar-img-line";
+        p.style.margin = "10px 0";
+        p.style.lineHeight = "0";
+        pickedImg.parentNode.insertBefore(p, pickedImg);
+        p.appendChild(pickedImg);
+      }
+      p.style.textAlign = align;
+      emit();
+    },
+    [pickedImg, emit]
+  );
+
+  const execParaAlign = useCallback(
+    (cmd) => {
+      if (!ref.current || readOnly) return;
+      ref.current.focus();
+      try {
+        document.execCommand(cmd, false);
+      } catch {
+        /* noop */
+      }
+      emit();
+    },
+    [readOnly, emit]
+  );
+
+  useEffect(() => {
+    if (!pickedImg) {
+      setImgBarRect(null);
+      return;
+    }
+    const upd = () => {
+      if (!pickedImg.isConnected) {
+        setPickedImg(null);
+        return;
+      }
+      const r = pickedImg.getBoundingClientRect();
+      setImgBarRect({ top: r.bottom + 6, left: r.left, w: Math.min(280, Math.max(200, r.width)) });
+    };
+    upd();
+    window.addEventListener("scroll", upd, true);
+    window.addEventListener("resize", upd);
+    return () => {
+      window.removeEventListener("scroll", upd, true);
+      window.removeEventListener("resize", upd);
+    };
+  }, [pickedImg]);
+
+  useEffect(() => {
+    if (readOnly) return;
+    const onDocDown = (e) => {
+      if (e.target.closest?.(".ar-img-toolbar")) return;
+      const root = ref.current;
+      if (!root) return;
+      if (e.target.tagName === "IMG" && root.contains(e.target)) {
+        setPickedImg(e.target);
+        return;
+      }
+      setPickedImg(null);
+    };
+    document.addEventListener("mousedown", onDocDown, true);
+    return () => document.removeEventListener("mousedown", onDocDown, true);
+  }, [readOnly]);
 
   const onPaste = useCallback(
     (e) => {
@@ -409,30 +511,102 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
     [onChange]
   );
 
+  const widthPct = pickedImg ? getImgWidthPercent(pickedImg) : 85;
+
   return (
     <>
-      <div
-        ref={ref}
-        className="ar-rich-input ar-rich-prose"
-        contentEditable={!readOnly}
-        suppressContentEditableWarning
-        data-placeholder={ph}
-        onInput={emit}
-        onBlur={emit}
-        onPaste={onPaste}
-        style={{
-          width: "100%",
-          maxWidth: "100%",
-          minHeight: 200,
-          padding: 12,
-          border: "1px solid #d1d5db",
-          borderRadius: 8,
-          boxSizing: "border-box",
-          outline: "none",
-          background: readOnly ? "#f8fafc" : "#fff",
-          overflowX: "hidden",
-        }}
-      />
+      {!readOnly ? (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            alignItems: "center",
+            marginBottom: 8,
+            fontSize: 11,
+            color: "#475569",
+          }}
+        >
+          <span style={{ fontWeight: 700, marginRight: 4 }}>본문 정렬</span>
+          <button type="button" onClick={() => execParaAlign("justifyLeft")} style={{ ...BTN_SECONDARY, padding: "5px 10px", fontSize: 11 }} title="왼쪽">
+            왼쪽
+          </button>
+          <button type="button" onClick={() => execParaAlign("justifyCenter")} style={{ ...BTN_SECONDARY, padding: "5px 10px", fontSize: 11 }} title="가운데">
+            가운데
+          </button>
+          <button type="button" onClick={() => execParaAlign("justifyRight")} style={{ ...BTN_SECONDARY, padding: "5px 10px", fontSize: 11 }} title="오른쪽">
+            오른쪽
+          </button>
+          <span style={{ opacity: 0.65, fontSize: 10, marginLeft: 4 }}>빈 줄·스페이스 후 가운데 정렬 가능</span>
+        </div>
+      ) : null}
+      <div style={{ position: "relative" }}>
+        <div
+          ref={ref}
+          className="ar-rich-input ar-rich-prose"
+          contentEditable={!readOnly}
+          suppressContentEditableWarning
+          data-placeholder={ph}
+          onInput={emit}
+          onBlur={emit}
+          onPaste={onPaste}
+          style={{
+            width: "100%",
+            maxWidth: "100%",
+            minHeight: 200,
+            padding: 12,
+            border: "1px solid #d1d5db",
+            borderRadius: 8,
+            boxSizing: "border-box",
+            outline: "none",
+            background: readOnly ? "#f8fafc" : "#fff",
+            overflowX: "hidden",
+          }}
+        />
+        {!readOnly && pickedImg && imgBarRect ? (
+          <div
+            className="ar-img-toolbar no-print"
+            onMouseDown={(e) => e.preventDefault()}
+            style={{
+              position: "fixed",
+              left: Math.min(window.innerWidth - 292, Math.max(8, imgBarRect.left)),
+              top: Math.min(window.innerHeight - 120, imgBarRect.top),
+              zIndex: 9999,
+              background: "#fff",
+              border: "1px solid #cbd5e1",
+              borderRadius: 10,
+              padding: "10px 12px",
+              boxShadow: "0 8px 28px rgba(0,0,0,.18)",
+              width: 280,
+              boxSizing: "border-box",
+            }}
+          >
+            <div style={{ fontSize: 11, fontWeight: 800, marginBottom: 6, color: "#0f172a" }}>이미지 크기 · 위치</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 11, whiteSpace: "nowrap", color: "#64748b" }}>너비 {widthPct}%</span>
+              <input
+                type="range"
+                min={15}
+                max={100}
+                value={widthPct}
+                onChange={(e) => applyImgWidth(Number(e.target.value))}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <button type="button" onClick={() => applyImgAlign("left")} style={{ ...BTN_SECONDARY, padding: "5px 10px", fontSize: 11 }}>
+                ◀ 왼쪽
+              </button>
+              <button type="button" onClick={() => applyImgAlign("center")} style={{ ...BTN_SECONDARY, padding: "5px 10px", fontSize: 11 }}>
+                중앙
+              </button>
+              <button type="button" onClick={() => applyImgAlign("right")} style={{ ...BTN_SECONDARY, padding: "5px 10px", fontSize: 11 }}>
+                오른쪽 ▶
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
       {!readOnly ? (
         <div style={{ marginTop: 6 }}>
           <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onPickImage} />
