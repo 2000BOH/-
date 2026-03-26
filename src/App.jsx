@@ -869,6 +869,7 @@ function ReadOnlyOverlay() {
 }
 
 const ROOM_SUM_ROW_ED = "__합계__";
+const ROOM_DAEWON_ROW_ED = "__대원소유분__";
 
 function RoomStatus({ data, onSave, readOnly }) {
   const { rooms, daewon: dwRaw, roomList } = data;
@@ -1041,11 +1042,84 @@ function RoomStatus({ data, onSave, readOnly }) {
                   <>{ROOM_TABLE_FIELDS.map(f => <td key={f.k} style={{ ...RTD({ textAlign: "right", color: f.k === "badRepair" && r[f.k] > 0 ? "#dc2626" : "#0f172a" }) }}>{fN(r[f.k])}</td>)}<td style={RTD({ textAlign: "center" })}><button type="button" disabled={readOnly} onClick={() => { setEd(cha); setEv({ ...r }); }} style={{ ...BTN, background: "#eff6ff", color: "#2563eb" }}>수정</button></td></>}
               </tr>);
             })}
-            <tr style={{ background: "#fafafa" }}>
+            <tr style={{ background: ed === ROOM_DAEWON_ROW_ED ? "#eff6ff" : "#fafafa" }}>
               <td style={{ ...RTD({ textAlign: "center", fontWeight: 800 }) }}>대원소유분</td>
-              <td style={{ ...RTD({ textAlign: "right", fontWeight: 700, background: "#f8fafc" }) }}>{fN(daewonListTotal != null ? daewonListTotal : sumRoom(dw))}</td>
-              {ROOM_TABLE_FIELDS.map(f => <td key={f.k} style={{ ...RTD({ textAlign: "right", color: f.k === "badRepair" && dw[f.k] > 0 ? "#dc2626" : "#0f172a" }) }}>{fN(dw[f.k])}</td>)}
-              <td style={RTD()} />
+              <td style={{ ...RTD({ textAlign: "right", fontWeight: 700, background: "#f8fafc" }) }}>
+                {ed === ROOM_DAEWON_ROW_ED ? (
+                  <span style={{ fontSize: 12, color: "#64748b" }}>{fN(ROOM_TABLE_FIELDS.reduce((s, f) => s + (parseInt(ev[f.k], 10) || 0), 0))} (열합)</span>
+                ) : (
+                  fN(daewonListTotal != null ? daewonListTotal : sumRoom(dw))
+                )}
+              </td>
+              {ed === ROOM_DAEWON_ROW_ED ? (
+                <>
+                  {ROOM_TABLE_FIELDS.map((f) => (
+                    <td key={f.k} style={RTD()}>
+                      <input
+                        type="number"
+                        min={0}
+                        value={ev[f.k] ?? 0}
+                        onChange={(e) => setEv({ ...ev, [f.k]: parseInt(e.target.value, 10) || 0 })}
+                        style={{
+                          width: "100%",
+                          maxWidth: f.k === "dormAsset" ? 84 : 56,
+                          boxSizing: "border-box",
+                          padding: "4px 6px",
+                          border: "2px solid #3b82f6",
+                          borderRadius: 6,
+                          fontSize: 14,
+                          textAlign: "right",
+                        }}
+                      />
+                    </td>
+                  ))}
+                  <td style={RTD()}>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        disabled={readOnly}
+                        onClick={() => {
+                          const nextDw = { ...dw };
+                          ROOM_TABLE_FIELDS.forEach((f) => {
+                            nextDw[f.k] = parseInt(ev[f.k], 10) || 0;
+                          });
+                          onSave({ ...data, daewon: nextDw });
+                          setEd(null);
+                        }}
+                        style={BTN}
+                      >
+                        저장
+                      </button>
+                      <button type="button" onClick={() => setEd(null)} style={{ ...BTN, background: "#e2e8f0", color: "#475569" }}>
+                        취소
+                      </button>
+                    </div>
+                  </td>
+                </>
+              ) : (
+                <>
+                  {ROOM_TABLE_FIELDS.map((f) => (
+                    <td key={f.k} style={{ ...RTD({ textAlign: "right", color: f.k === "badRepair" && dw[f.k] > 0 ? "#dc2626" : "#0f172a" }) }}>{fN(dw[f.k])}</td>
+                  ))}
+                  <td style={RTD({ textAlign: "center" })}>
+                    <button
+                      type="button"
+                      disabled={readOnly}
+                      onClick={() => {
+                        setEd(ROOM_DAEWON_ROW_ED);
+                        const o = {};
+                        ROOM_TABLE_FIELDS.forEach((x) => {
+                          o[x.k] = dw[x.k] || 0;
+                        });
+                        setEv(o);
+                      }}
+                      style={{ ...BTN, background: "#eff6ff", color: "#2563eb" }}
+                    >
+                      수정
+                    </button>
+                  </td>
+                </>
+              )}
             </tr>
           </tbody>
         </table>
@@ -1764,10 +1838,10 @@ function ReportView({ data }) {
         </div>
       ) : (
         <div ref={ptShellRef} style={{ position: "fixed", inset: 0, zIndex: 99999, background: "linear-gradient(180deg,#0f172a 0%,#020617 100%)", overflow: "hidden", display: "flex", flexDirection: "row", alignItems: "stretch", justifyContent: "flex-start", padding: "10px 14px 20px 10px", boxSizing: "border-box", gap: 12 }}>
-          <div className="no-print" style={{ display: "flex", flexDirection: "column", gap: 40, flexShrink: 0, width: "min(152px, 24vw)", paddingLeft: 4, alignSelf: "center", justifyContent: "center" }}>
-            <button type="button" onClick={exitPt} style={{ background: "#334155", color: "#fff", border: "none", padding: "10px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 800, width: "100%", boxSizing: "border-box" }}>닫기 (Esc)</button>
-            <button type="button" onClick={() => { const el = ptShellRef.current; if (el?.requestFullscreen) el.requestFullscreen().catch(() => {}); else if (el?.webkitRequestFullscreen) el.webkitRequestFullscreen(); }} style={{ background: "#2563eb", color: "#fff", border: "none", padding: "10px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 800, width: "100%", boxSizing: "border-box" }}>⛶ 전체화면</button>
-            <button type="button" onClick={clearHighlighter} style={{ background: "#38bdf8", color: "#0f172a", border: "none", padding: "10px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 800, width: "100%", boxSizing: "border-box" }}>형광 지우기</button>
+          <div className="no-print" style={{ display: "flex", flexDirection: "column", gap: 22, flexShrink: 0, width: "min(76px, 12vw)", paddingLeft: 2, alignSelf: "center", justifyContent: "center" }}>
+            <button type="button" onClick={exitPt} style={{ background: "#334155", color: "#fff", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>닫기 (Esc)</button>
+            <button type="button" onClick={() => { const el = ptShellRef.current; if (el?.requestFullscreen) el.requestFullscreen().catch(() => {}); else if (el?.webkitRequestFullscreen) el.webkitRequestFullscreen(); }} style={{ background: "#2563eb", color: "#fff", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>⛶ 전체화면</button>
+            <button type="button" onClick={clearHighlighter} style={{ background: "#38bdf8", color: "#0f172a", border: "none", padding: "18px 4px", borderRadius: 8, cursor: "pointer", fontSize: 11, fontWeight: 800, width: "100%", boxSizing: "border-box", minHeight: 88, lineHeight: 1.25, whiteSpace: "normal", wordBreak: "keep-all" }}>형광 지우기</button>
           </div>
           <div style={{ flex: 1, minWidth: 0, position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }}>
             <div
