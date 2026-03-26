@@ -70,6 +70,11 @@ function sanitizePastedHtml(raw) {
     const v = el.getAttribute("style");
     if (v != null && !String(v).trim()) el.removeAttribute("style");
   });
+  /* 붙여넣은 이미지의 width/height 속성이 있으면 이후 % 크기 조절이 브라우저에서 무시되는 경우가 있음 */
+  doc.querySelectorAll("img").forEach((img) => {
+    img.removeAttribute("width");
+    img.removeAttribute("height");
+  });
   normalizePastedTableToHorizontalRules(doc);
   relaxPastedTablesToFitWidth(doc);
   return doc.body.innerHTML.trim();
@@ -312,9 +317,17 @@ function normalizeLoadedPrompt(p) {
 }
 
 function getImgWidthPercent(img) {
-  const w = img?.style?.width;
-  const m = String(w || "").match(/(\d+(?:\.\d+)?)%/);
+  if (!img) return 85;
+  const sw = img.style?.width;
+  const m = String(sw || "").match(/(\d+(?:\.\d+)?)%/);
   if (m) return Math.min(100, Math.max(10, Math.round(parseFloat(m[1]))));
+  const aw = img.getAttribute("width");
+  if (aw != null && String(aw).trim() !== "") {
+    const root = img.closest?.(".ar-rich-input, .ar-rich-body, .ar-rich-prose");
+    const rw = root?.clientWidth || img.parentElement?.clientWidth || 400;
+    const px = parseFloat(String(aw).replace(/px/i, ""));
+    if (!Number.isNaN(px) && rw > 0) return Math.min(100, Math.max(10, Math.round((px / rw) * 100)));
+  }
   return 85;
 }
 
@@ -377,12 +390,20 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
   const applyImgWidth = useCallback(
     (pct) => {
       if (!pickedImg || !ref.current) return;
-      pickedImg.style.width = `${pct}%`;
-      pickedImg.style.maxWidth = "100%";
-      pickedImg.style.height = "auto";
-      emit();
+      const img = pickedImg;
+      /* HTML width/height 속성이 있으면 CSS width보다 우선해 % 조절이 무시되는 경우가 많음 */
+      img.removeAttribute("width");
+      img.removeAttribute("height");
+      img.style.removeProperty("width");
+      img.style.removeProperty("max-width");
+      img.style.setProperty("width", `${pct}%`, "important");
+      img.style.setProperty("max-width", "100%", "important");
+      img.style.setProperty("height", "auto", "important");
+      img.style.setProperty("display", "inline-block", "important");
+      img.style.setProperty("vertical-align", "middle", "important");
+      onChange(ref.current.innerHTML);
     },
-    [pickedImg, emit]
+    [pickedImg, onChange]
   );
 
   const applyImgAlign = useCallback(
@@ -398,9 +419,9 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
         p.appendChild(pickedImg);
       }
       p.style.textAlign = align;
-      emit();
+      onChange(ref.current.innerHTML);
     },
-    [pickedImg, emit]
+    [pickedImg, onChange]
   );
 
   const execParaAlign = useCallback(
@@ -566,7 +587,10 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
         {!readOnly && pickedImg && imgBarRect ? (
           <div
             className="ar-img-toolbar no-print"
-            onMouseDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => {
+              if (e.target.closest("input, button, textarea, select")) return;
+              e.preventDefault();
+            }}
             style={{
               position: "fixed",
               left: Math.min(window.innerWidth - 292, Math.max(8, imgBarRect.left)),
@@ -589,6 +613,7 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
                 min={15}
                 max={100}
                 value={widthPct}
+                onInput={(e) => applyImgWidth(Number(e.target.value))}
                 onChange={(e) => applyImgWidth(Number(e.target.value))}
                 style={{ flex: 1, minWidth: 0 }}
               />
