@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 const BTN_SECONDARY = {
   padding: "8px 14px",
@@ -20,6 +21,30 @@ const BTN_DANGER = {
   background: "#fee2e2",
   color: "#b91c1c",
   lineHeight: 1,
+};
+
+/** 추가 보고 상단 다크 툴바 버튼 */
+const AR_TOOLBAR_BTN = {
+  padding: "8px 14px",
+  borderRadius: 8,
+  border: "1px solid rgba(255,255,255,0.22)",
+  background: "rgba(255,255,255,0.1)",
+  color: "#f1f5f9",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+const AR_TOOLBAR_BTN_PRIMARY = {
+  ...AR_TOOLBAR_BTN,
+  background: "#16a34a",
+  border: "none",
+  color: "#fff",
+};
+const AR_TOOLBAR_BTN_BLUE = {
+  ...AR_TOOLBAR_BTN,
+  background: "#2563eb",
+  border: "none",
+  color: "#fff",
 };
 
 function uid() {
@@ -364,9 +389,18 @@ function insertImageAtSelection(container, dataUrl, onHtmlChange) {
   onHtmlChange(container.innerHTML);
 }
 
-function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
+function RichInput({ html, readOnly, onChange, placeholder, inputKey, editorRef }) {
   const ph = placeholder?.trim() ? placeholder.trim() : undefined;
   const ref = useRef(null);
+  const setEditorEl = useCallback(
+    (el) => {
+      ref.current = el;
+      if (!editorRef) return;
+      if (typeof editorRef === "function") editorRef(el);
+      else editorRef.current = el;
+    },
+    [editorRef]
+  );
   const skipRef = useRef(false);
   const [pickedImg, setPickedImg] = useState(null);
   const [imgBarRect, setImgBarRect] = useState(null);
@@ -563,7 +597,7 @@ function RichInput({ html, readOnly, onChange, placeholder, inputKey }) {
       ) : null}
       <div style={{ position: "relative" }}>
         <div
-          ref={ref}
+          ref={setEditorEl}
           className="ar-rich-input ar-rich-prose"
           contentEditable={!readOnly}
           suppressContentEditableWarning
@@ -648,6 +682,7 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
   const [items, setItems] = useState(() => [{ id: uid(), html: "" }]);
   const [toast, setToast] = useState(null);
   const [contentOnlyView, setContentOnlyView] = useState(false);
+  const firstEditorRef = useRef(null);
 
   const savedWeekSig = JSON.stringify(data.additionalReports?.[weekKey] ?? null);
   useEffect(() => {
@@ -696,11 +731,143 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
     setToast("저장되었습니다.");
   }, [data, items, onSave, weekKey]);
 
+  const pasteFromClipboard = useCallback(async () => {
+    if (readOnly) return;
+    const firstId = items[0]?.id;
+    if (!firstId) return;
+    const container = firstEditorRef.current;
+    if (!container) {
+      window.alert("먼저 「편집」을 눌러 입력란을 연 뒤 붙여넣기를 사용하세요.");
+      return;
+    }
+    container.focus();
+    const onHtmlChange = (h) => updateHtml(firstId, h);
+    try {
+      if (navigator.clipboard?.read) {
+        const clipItems = await navigator.clipboard.read();
+        for (const ci of clipItems) {
+          for (const t of ci.types) {
+            if (t.startsWith("image/")) {
+              const blob = await ci.getType(t);
+              const reader = new FileReader();
+              reader.onload = () => insertImageAtSelection(container, reader.result, onHtmlChange);
+              reader.readAsDataURL(blob);
+              return;
+            }
+          }
+        }
+        for (const ci of clipItems) {
+          if (ci.types.includes("text/html")) {
+            const blob = await ci.getType("text/html");
+            const htmlRaw = await blob.text();
+            const cleaned = sanitizePastedHtml(htmlRaw);
+            const textOnly = cleaned.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").replace(/&nbsp;/g, " ").trim();
+            if (cleaned && (textOnly.length > 0 || /<img[\s>]/i.test(cleaned))) {
+              insertHtmlAtSelection(container, cleaned, onHtmlChange);
+              return;
+            }
+          }
+        }
+        for (const ci of clipItems) {
+          if (ci.types.includes("text/plain")) {
+            const blob = await ci.getType("text/plain");
+            const plain = await blob.text();
+            if (plain != null && String(plain).trim() !== "") {
+              const parts = String(plain).split(/\n{2,}/);
+              const inner = parts.map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`).join("");
+              insertHtmlAtSelection(container, inner, onHtmlChange);
+              return;
+            }
+          }
+        }
+      }
+      const plain = await navigator.clipboard.readText();
+      if (plain != null && String(plain).trim() !== "") {
+        const parts = String(plain).split(/\n{2,}/);
+        const inner = parts.map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`).join("");
+        insertHtmlAtSelection(container, inner, onHtmlChange);
+      }
+    } catch {
+      window.alert("클립보드를 읽을 수 없습니다. 입력란을 클릭한 뒤 Ctrl+V를 사용하세요.");
+    }
+  }, [readOnly, items, updateHtml]);
+
   const displayContentOnly = readOnly || contentOnlyView;
   const reportBlocks = items.filter((i) => isNonEmptyBody(i.html));
+  const canPasteInToolbar = !readOnly && !displayContentOnly;
+
+  const [toolbarAnchor, setToolbarAnchor] = useState(null);
+  useLayoutEffect(() => {
+    const el = typeof document !== "undefined" ? document.getElementById("additional-toolbar-anchor") : null;
+    setToolbarAnchor(el);
+  }, []);
+
+  const toolbarNode = (
+    <div
+      className="no-print"
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8,
+        alignItems: "center",
+        justifyContent: "center",
+        maxWidth: 1100,
+        margin: "0 auto",
+      }}
+    >
+      <button
+        type="button"
+        disabled={!canPasteInToolbar}
+        title={canPasteInToolbar ? "클립보드를 첫 입력란에 붙여넣습니다" : "편집 모드에서만 사용할 수 있습니다"}
+        onClick={pasteFromClipboard}
+        style={{
+          ...AR_TOOLBAR_BTN,
+          opacity: !canPasteInToolbar ? 0.45 : 1,
+          cursor: !canPasteInToolbar ? "not-allowed" : "pointer",
+        }}
+      >
+        📋 붙여넣기
+      </button>
+      {onOpenPtAdditional ? (
+        <button type="button" onClick={onOpenPtAdditional} style={{ ...AR_TOOLBAR_BTN, background: "#0f172a", border: "1px solid rgba(255,255,255,0.25)" }}>
+          📺 PT
+        </button>
+      ) : null}
+      <button type="button" onClick={() => window.print()} style={AR_TOOLBAR_BTN_BLUE}>
+        🖨️ 인쇄
+      </button>
+      {onGoToReport ? (
+        <button type="button" onClick={onGoToReport} style={{ ...AR_TOOLBAR_BTN, background: "rgba(248,250,252,0.95)", color: "#0f172a", border: "none" }}>
+          ‹ 보고서
+        </button>
+      ) : null}
+      <button
+        type="button"
+        disabled={readOnly || !weekKey}
+        onClick={saveWeek}
+        title={!weekKey ? "보고서 기준일로 주차를 만든 뒤 저장할 수 있습니다" : undefined}
+        style={{
+          ...AR_TOOLBAR_BTN_PRIMARY,
+          opacity: readOnly || !weekKey ? 0.6 : 1,
+          cursor: readOnly || !weekKey ? "not-allowed" : "pointer",
+        }}
+      >
+        💾 저장
+      </button>
+      {!readOnly && displayContentOnly ? (
+        <button type="button" onClick={() => setContentOnlyView(false)} style={{ ...AR_TOOLBAR_BTN, background: "rgba(148,163,184,0.35)", border: "1px solid rgba(255,255,255,0.3)" }}>
+          ✏️ 편집
+        </button>
+      ) : null}
+    </div>
+  );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14, flex: 1, maxWidth: 1100, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
+    <div
+      className="additional-report-print"
+      style={{ display: "flex", flexDirection: "column", gap: 14, flex: 1, width: "100%", boxSizing: "border-box" }}
+    >
+      {toolbarAnchor ? createPortal(toolbarNode, toolbarAnchor) : null}
       <style>{RICH_PROSE_CSS}</style>
       {toast ? (
         <div
@@ -726,8 +893,8 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
         </div>
       ) : null}
 
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+      <div style={{ maxWidth: 1100, margin: "0 auto", width: "100%", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div>
           <h2 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 6px", color: "#0f172a" }}>추가 보고</h2>
           <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>
             {weekLabel ? (
@@ -739,57 +906,9 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
             )}
           </p>
         </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", flexShrink: 0 }}>
-          {onOpenPtAdditional ? (
-            <button
-              type="button"
-              className="no-print"
-              onClick={onOpenPtAdditional}
-              style={{
-                padding: "10px 16px",
-                borderRadius: 10,
-                border: "none",
-                background: "#0f172a",
-                color: "#fff",
-                fontSize: 14,
-                fontWeight: 800,
-                cursor: "pointer",
-              }}
-            >
-              📺 PT
-            </button>
-          ) : null}
-          {onGoToReport ? (
-            <button
-              type="button"
-              className="no-print"
-              onClick={onGoToReport}
-              style={{
-                padding: "10px 16px",
-                borderRadius: 10,
-                border: "1px solid #cbd5e1",
-                background: "#f1f5f9",
-                color: "#0f172a",
-                fontSize: 14,
-                fontWeight: 800,
-                cursor: "pointer",
-              }}
-            >
-              ‹ 보고서
-            </button>
-          ) : null}
-        </div>
-      </div>
 
       {displayContentOnly ? (
         <>
-          {!readOnly ? (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-              <button type="button" onClick={() => setContentOnlyView(false)} style={{ ...BTN_SECONDARY, padding: "8px 18px" }}>
-                편집
-              </button>
-            </div>
-          ) : null}
           {reportBlocks.length === 0 ? (
             <div style={{ padding: 20, textAlign: "center", color: "#94a3b8", fontSize: 14 }}>
               저장된 보고 내용이 없습니다. {!readOnly ? "편집에서 입력 후 저장하세요." : null}
@@ -813,26 +932,6 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
               </div>
             ))
           )}
-          {!readOnly ? (
-            <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: 16, marginTop: 8 }}>
-              <button
-                type="button"
-                onClick={saveWeek}
-                style={{
-                  padding: "12px 28px",
-                  border: "none",
-                  borderRadius: 10,
-                  fontSize: 14,
-                  fontWeight: 800,
-                  cursor: "pointer",
-                  background: "linear-gradient(135deg,#16a34a,#15803d)",
-                  color: "#fff",
-                }}
-              >
-                저장
-              </button>
-            </div>
-          ) : null}
         </>
       ) : (
         <>
@@ -865,6 +964,7 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
                 inputKey={`${weekKey}:${savedWeekSig}:${item.id}`}
                 html={item.html}
                 readOnly={readOnly}
+                editorRef={index === 0 ? firstEditorRef : undefined}
                 onChange={(h) => updateHtml(item.id, h)}
               />
             </div>
@@ -875,29 +975,9 @@ export default function AdditionalReport({ data, onSave, readOnly, weekKey, week
               ＋ 입력란 추가
             </button>
           </div>
-
-          <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: 16, marginTop: 8 }}>
-            <button
-              type="button"
-              disabled={readOnly}
-              onClick={saveWeek}
-              style={{
-                padding: "12px 28px",
-                border: "none",
-                borderRadius: 10,
-                fontSize: 14,
-                fontWeight: 800,
-                cursor: readOnly ? "not-allowed" : "pointer",
-                background: readOnly ? "#cbd5e1" : "linear-gradient(135deg,#16a34a,#15803d)",
-                color: "#fff",
-                opacity: readOnly ? 0.7 : 1,
-              }}
-            >
-              저장
-            </button>
-          </div>
         </>
       )}
+      </div>
     </div>
   );
 }

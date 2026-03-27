@@ -150,6 +150,19 @@ function parseRoomListMoneyCell(val) {
   return Math.round(n);
 }
 
+/** 객실목록 운영종료 셀 → Date (YYYY-MM-DD 우선). 실패 시 null */
+function parseRoomListOpEndDateCell(s) {
+  const t = String(s ?? "").trim();
+  if (!t) return null;
+  const m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const d = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(t);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function isLikelyMoneyColumn(val) {
   const s = String(val ?? "").trim();
   if (!s) return false;
@@ -429,7 +442,25 @@ function distributeColumnTotalsToRooms(rooms, targetsByKey) {
 
 function sumRoom(r) { let s = 0; FKEYS.forEach(k => { s += (r[k] || 0); }); return s; }
 function longStay(r) { return (r.inspire || 0) + (r.sharp || 0) + (r.etcCorp || 0) + (r.personal || 0); }
-function fK(n) { if (!n) return "0"; if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(1) + "억"; if (Math.abs(n) >= 1e7) return Math.round(n / 1e4).toLocaleString() + "만"; return n.toLocaleString(); }
+/** 금액 표시: 1억 이상 → N억원, 1만 이상 → N만원, 미만 → 콤마+원 */
+function fK(n) {
+  if (n == null || n === "") return "0원";
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "0원";
+  if (v === 0) return "0원";
+  const abs = Math.abs(v);
+  const sign = v < 0 ? "-" : "";
+  if (abs >= 1e8) return sign + (abs / 1e8).toFixed(1).replace(/\.0$/, "") + "억원";
+  if (abs >= 1e4) return sign + Math.round(abs / 1e4).toLocaleString() + "만원";
+  return sign + abs.toLocaleString() + "원";
+}
+/** 계약 행: 보증금×객실수·임대료×객실수 (원, 저장값 기준 자동 계산) */
+function contractDepositTimesRooms(c) { return (Number(c?.deposit) || 0) * (Number(c?.rooms) || 0); }
+function contractRentTimesRooms(c) { return (Number(c?.rent) || 0) * (Number(c?.rooms) || 0); }
+/** 입주 계약: 업체명에 인스파이어가 있으면 월별표 「인스파이어」행, 그 외(울트라·샤프 등)는 「신규입주」행 */
+function isInspireLineContract(company) {
+  return String(company || "").includes("인스파이어");
+}
 function fN(n) { return (n || 0).toLocaleString(); }
 function getWeekStr(ds) { if (!ds) return ""; const d = new Date(ds), j = new Date(d.getFullYear(), 0, 1), days = Math.floor((d - j) / 864e5), w = Math.ceil((days + j.getDay() + 1) / 7); return d.getFullYear() + "-W" + String(w).padStart(2, "0"); }
 /** 기준일 주차의 추가 보고 입력란 중 본문이 있는 항목 */
@@ -486,12 +517,19 @@ function PtTipWeekBubble({ cur, prevVal }) {
   );
 }
 
-/** PT: 전월 대비 (월별 수익 표) */
+/** PT: 전월 대비 (월별 수익 표) — 금액은 fK(억원·만원·원), 객실수만 숫자 */
 function PtTipMonthBubble({ cur, prevVal, kind, hasPrev }) {
   const a = Number(cur) || 0;
   const b = Number(prevVal) || 0;
-  const d = diffVal(a, b);
-  const fmt = (v) => (kind === "rooms" ? String(v || 0) : (v ? fN(v) : "-"));
+  const isRooms = kind === "rooms";
+  const d = (() => {
+    if (isRooms) return diffVal(a, b);
+    const diff = a - b;
+    if (diff > 0) return { t: "▲" + fK(diff), c: "#c00" };
+    if (diff < 0) return { t: "▼" + fK(Math.abs(diff)), c: "#00c" };
+    return { t: "-", c: "#888" };
+  })();
+  const fmt = (v) => (isRooms ? String(v || 0) : (v ? fK(v) : "-"));
   return (
     <div style={{ ...PT_TIP_BOX, fontSize: 12, lineHeight: 1.38 }}>
       {hasPrev ? (
@@ -585,11 +623,45 @@ const initData = {
     { id: 10, month: "4월", company: "대성베리힐CC", deposit: 8000000, rent: 4070000, rooms: 4, moveDate: "2026-04-15", status: "예정", visible: true, type: "입주", week: "2026-W16" },
   ],
   inspire: [ { id: 1, type: "입실", rooms: 7, date: "2026-03-29", note: "3월 말", status: "확정" }, { id: 2, type: "입실예정", rooms: 15, date: "2026-04-10", note: "4월 중", status: "예정" }, { id: 3, type: "퇴실", rooms: 0, date: "", note: "해당 없음", status: "확정" } ],
-  notes: "악성보수객실 임대료 30만원 안내 실시", reportDate: "2026-03-24",
+  notes: "", reportDate: "2026-03-24",
+  reportMoveInCells: {},
   reportSnapshots: {},
   roomList: null,
   additionalReports: {}
 };
+
+/** 예전 기본값/저장본에 남은 「※ 비고 : 악성보수객실 임대료 30만원…」류 문구 제거 */
+const LEGACY_REPORT_NOTE_SNIPPET = "악성보수객실 임대료 30만원";
+function purgeLegacyReportNotes(input) {
+  if (!input || typeof input !== "object") return { next: input, dirty: false };
+  let dirty = false;
+  const out = { ...input };
+  if (typeof out.notes === "string" && out.notes.includes(LEGACY_REPORT_NOTE_SNIPPET)) {
+    out.notes = "";
+    dirty = true;
+  }
+  if (out.reportMoveInCells && typeof out.reportMoveInCells === "object") {
+    const cells = { ...out.reportMoveInCells };
+    let cellsChanged = false;
+    for (const k of Object.keys(cells)) {
+      const c = cells[k];
+      if (!c || typeof c !== "object") continue;
+      const note = c.note;
+      if (typeof note === "string" && note.includes(LEGACY_REPORT_NOTE_SNIPPET)) {
+        const nc = { ...c };
+        delete nc.note;
+        if (Object.keys(nc).length === 0) delete cells[k];
+        else cells[k] = nc;
+        cellsChanged = true;
+      }
+    }
+    if (cellsChanged) {
+      out.reportMoveInCells = cells;
+      dirty = true;
+    }
+  }
+  return { next: dirty ? out : input, dirty };
+}
 
 const Badge = ({ children, color = "blue" }) => {
   const cs = { blue: "#2563eb", green: "#16a34a", red: "#dc2626", amber: "#d97706", gray: "#6b7280" };
@@ -603,7 +675,12 @@ export default function App() {
   const [data, setData] = useState(null);
   const [snapshotWeekKey, setSnapshotWeekKey] = useState(null);
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r && r.value) {
-    setData({ ...initData, ...JSON.parse(r.value) });
+    const merged = { ...initData, ...JSON.parse(r.value) };
+    const { next, dirty } = purgeLegacyReportNotes(merged);
+    setData(next);
+    if (dirty) {
+      try { await window.storage.set(STORAGE_KEY, JSON.stringify(next)); } catch (e2) { /* noop */ }
+    }
   } else throw 0; } catch (e) { try { await window.storage.set(STORAGE_KEY, JSON.stringify(initData)); } catch (e2) {} setData(initData); } })(); }, []);
   const save = useCallback(async d => {
     setData(d);
@@ -632,6 +709,7 @@ export default function App() {
       inspire: JSON.parse(JSON.stringify(data.inspire || [])),
       notes: data.notes,
       reportDate: data.reportDate,
+      reportMoveInCells: JSON.parse(JSON.stringify(data.reportMoveInCells || {})),
       roomList: snapRoomList,
       additionalReports: JSON.parse(JSON.stringify(data.additionalReports || {}))
     };
@@ -641,16 +719,20 @@ export default function App() {
   }, [data, save]);
   const effectiveData = useMemo(() => {
     if (!data) return null;
-    if (!snapshotWeekKey) return data;
-    const e = data.reportSnapshots?.[snapshotWeekKey];
-    if (!e?.snapshot) return data;
-    return {
-      ...data,
-      ...e.snapshot,
-      reportSnapshots: data.reportSnapshots,
-      /* 추가 보고: 선택한 저장 주차 스냅샷에 들어 있던 내용만 표시 (현재 편집본과 섞지 않음) */
-      additionalReports: { ...(e.snapshot.additionalReports || {}) },
-    };
+    let base = data;
+    if (snapshotWeekKey) {
+      const e = data.reportSnapshots?.[snapshotWeekKey];
+      if (e?.snapshot) {
+        base = {
+          ...data,
+          ...e.snapshot,
+          reportSnapshots: data.reportSnapshots,
+          /* 추가 보고: 선택한 저장 주차 스냅샷에 들어 있던 내용만 표시 (현재 편집본과 섞지 않음) */
+          additionalReports: { ...(e.snapshot.additionalReports || {}) },
+        };
+      }
+    }
+    return purgeLegacyReportNotes(base).next;
   }, [data, snapshotWeekKey]);
   if (!data || !effectiveData) return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>로딩 중...</div>;
 
@@ -678,8 +760,56 @@ export default function App() {
           }
           /* 보고서 시트만 인쇄 (헤더·탭·인쇄 버튼 등 나머지는 숨김) */
           body * { visibility: hidden !important; }
-          .report-sheet, .report-sheet * { visibility: visible !important; }
+          .report-a4-chrome,
+          .report-a4-chrome * {
+            visibility: visible !important;
+          }
+          .report-a4-chrome {
+            position: relative !important;
+            left: auto !important;
+            top: auto !important;
+            right: auto !important;
+            bottom: auto !important;
+            width: 100% !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: stretch !important;
+            justify-content: flex-start !important;
+            box-sizing: border-box !important;
+            background: #fff !important;
+            overflow: visible !important;
+          }
+          .report-sheet-outer {
+            box-sizing: border-box !important;
+            max-width: 100% !important;
+            max-height: none !important;
+            height: auto !important;
+          }
           .report-sheet {
+            position: relative !important;
+            left: auto !important;
+            top: auto !important;
+            width: 100% !important;
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            box-sizing: border-box !important;
+            flex: 0 0 auto !important;
+            min-height: 0 !important;
+            height: auto !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: flex-start !important;
+            overflow: visible !important;
+          }
+          .additional-report-print,
+          .additional-report-print * {
+            visibility: visible !important;
+          }
+          .additional-report-print {
             position: absolute !important;
             left: 0 !important;
             top: 0 !important;
@@ -688,6 +818,7 @@ export default function App() {
             margin: 0 !important;
             padding: 12px 16px !important;
             box-sizing: border-box !important;
+            background: #fff !important;
           }
         }
       `}</style>
@@ -719,13 +850,25 @@ export default function App() {
         <nav style={{ padding: "10px 24px 0", display: "flex", flexWrap: "wrap", gap: 6, rowGap: 4, background: "#f1f5f9" }}>
           {tabs.map(t => <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{ padding: "9px 18px", borderRadius: "10px 10px 0 0", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, background: tab === t.key ? "#fff" : "transparent", color: tab === t.key ? "#0f172a" : "#64748b", borderBottom: tab === t.key ? "2px solid #3b82f6" : "2px solid transparent", whiteSpace: "nowrap" }}><span style={{ marginRight: 5 }}>{t.icon}</span>{t.label}</button>)}
         </nav>
+        {/* 추가 보고 툴바는 AdditionalReport에서 createPortal로 여기에 붙습니다 */}
+        <div
+          id="additional-toolbar-anchor"
+          className="no-print"
+          style={{
+            display: tab === "additional" ? "block" : "none",
+            background: "linear-gradient(180deg,#1e293b 0%,#0f172a 100%)",
+            borderTop: "1px solid rgba(255,255,255,0.1)",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+            padding: "10px 16px",
+          }}
+        />
       </div>
       <main className="app-main-shell" style={{ padding: "16px 24px 40px", maxWidth: 1600, margin: "0 auto" }}>
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
           {tab === "dashboard" && <Dashboard data={effectiveData} snapshotMode={snapReading} />}
           {tab === "rooms" && <RoomStatus data={effectiveData} onSave={save} readOnly={snapReading} />}
           {tab === "contracts" && <ContractMgr data={effectiveData} onSave={save} readOnly={snapReading} />}
-          {tab === "report" && <ReportView data={effectiveData} />}
+          {tab === "report" && <ReportView data={effectiveData} onSave={savePartial} readOnly={snapReading} />}
           {tab === "additional" && (
             <AdditionalReport
               data={effectiveData}
@@ -1239,11 +1382,11 @@ function ContractMgr({ data, onSave, readOnly }) {
         </label>
       </div>
       <Card style={{ padding: 0, overflowX: "auto", flex: 1 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-          <thead><tr style={{ background: "#fffbeb" }}>{["주차", "월", "구분", "업체/개인", "보증금", "임대료", "객실수", "입주일", "상태", "표시", "액션"].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
+        <table style={{ width: "100%", minWidth: 1240, borderCollapse: "collapse", fontSize: 13 }}>
+          <thead><tr style={{ background: "#fffbeb" }}>{["주차", "월", "구분", "업체/개인", "보증금", "임대료", "객실수", "보증금합계", "임대료합계", "입주일", "상태", "표시", "액션"].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
           <tbody>{filtered.map(c => {
-            if (eid === c.id) return (<tr key={c.id} style={{ background: "#eff6ff", borderBottom: "1px solid #e2e8f0" }}><td style={{ ...TD, fontSize: 12, color: weekTdColor(ef.week || c.week) }}>{formatKoMonthWeekLabel(ef.week || c.week)}</td><td style={TD}>{ef.month}</td><td style={TD}><select value={ef.type} onChange={e => setEf({ ...ef, type: e.target.value })} style={{ ...INP, width: 56 }}><option>입주</option><option>퇴실</option><option>예정</option><option>기존</option></select></td><td style={TD}><input value={ef.company} onChange={e => setEf({ ...ef, company: e.target.value })} style={{ ...INP, width: 110 }} /></td><td style={TD}><input type="number" value={ef.deposit} onChange={e => setEf({ ...ef, deposit: parseInt(e.target.value) || 0 })} style={{ ...INP, width: 90 }} /></td><td style={TD}><input type="number" value={ef.rent} onChange={e => setEf({ ...ef, rent: parseInt(e.target.value) || 0 })} style={{ ...INP, width: 90 }} /></td><td style={TD}><input type="number" value={ef.rooms} onChange={e => setEf({ ...ef, rooms: parseInt(e.target.value) || 0 })} style={{ ...INP, width: 44 }} /></td><td style={TD}><input type="date" value={ef.moveDate} onChange={e => setEf({ ...ef, moveDate: e.target.value })} style={{ ...INP, width: 120 }} /></td><td style={TD}><select value={ef.status} onChange={e => setEf({ ...ef, status: e.target.value })} style={{ ...INP, width: 56 }}><option>확정</option><option>예정</option></select></td><td></td><td style={TD}><div style={{ display: "flex", gap: 2 }}><button onClick={() => { const wk = ef.moveDate ? getWeekStr(ef.moveDate) : ef.week; onSave({ ...data, contracts: data.contracts.map(x => x.id === eid ? { ...ef, week: wk || ef.week } : x) }); setEid(null); }} style={BTN}>저장</button><button onClick={() => setEid(null)} style={{ ...BTN, background: "#e2e8f0", color: "#475569" }}>취소</button></div></td></tr>);
-            return (<tr key={c.id} style={{ borderBottom: "1px solid #e2e8f0", opacity: c.visible ? 1 : .4, background: c.type === "퇴실" ? "#fef2f2" : "" }}><td style={{ ...TD, fontSize: 12, color: weekTdColor(c.week) }}>{formatKoMonthWeekLabel(c.week)}</td><td style={{ ...TD, fontWeight: 600 }}>{c.month}</td><td style={TD}><Badge color={c.type === "입주" ? "green" : c.type === "퇴실" ? "red" : c.type === "예정" ? "amber" : "blue"}>{c.type}</Badge></td><td style={{ ...TD, fontWeight: 500 }}>{c.company}</td><td style={{ ...TD, textAlign: "right" }}>{fK(c.deposit)}</td><td style={{ ...TD, textAlign: "right" }}>{fK(c.rent)}</td><td style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#2563eb" }}>{c.rooms}</td><td style={{ ...TD, fontSize: 10 }}>{c.moveDate}</td><td style={TD}><Badge color={c.status === "확정" ? "green" : "amber"}>{c.status}</Badge></td><td style={TD}><button onClick={() => onSave({ ...data, contracts: data.contracts.map(x => x.id === c.id ? { ...x, visible: !x.visible } : x) })} style={{ ...BTN, background: c.visible ? "#dcfce7" : "#fee2e2", color: c.visible ? "#16a34a" : "#dc2626", fontSize: 9 }}>{c.visible ? "표시" : "숨김"}</button></td><td style={TD}><div style={{ display: "flex", gap: 2 }}><button onClick={() => { setEid(c.id); setEf({ ...c }); }} style={{ ...BTN, background: "#eff6ff", color: "#2563eb" }}>수정</button><button onClick={() => onSave({ ...data, contracts: data.contracts.filter(x => x.id !== c.id) })} style={{ ...BTN, background: "#fef2f2", color: "#dc2626" }}>삭제</button></div></td></tr>);
+            if (eid === c.id) return (<tr key={c.id} style={{ background: "#eff6ff", borderBottom: "1px solid #e2e8f0" }}><td style={{ ...TD, fontSize: 12, color: weekTdColor(ef.week || c.week) }}>{formatKoMonthWeekLabel(ef.week || c.week)}</td><td style={TD}>{ef.month}</td><td style={TD}><select value={ef.type} onChange={e => setEf({ ...ef, type: e.target.value })} style={{ ...INP, width: 56 }}><option>입주</option><option>퇴실</option><option>예정</option><option>기존</option></select></td><td style={TD}><input value={ef.company} onChange={e => setEf({ ...ef, company: e.target.value })} style={{ ...INP, width: 110 }} /></td><td style={TD}><input type="number" value={ef.deposit} onChange={e => setEf({ ...ef, deposit: parseInt(e.target.value) || 0 })} style={{ ...INP, width: 90 }} /></td><td style={TD}><input type="number" value={ef.rent} onChange={e => setEf({ ...ef, rent: parseInt(e.target.value) || 0 })} style={{ ...INP, width: 90 }} /></td><td style={TD}><input type="number" value={ef.rooms} onChange={e => setEf({ ...ef, rooms: parseInt(e.target.value) || 0 })} style={{ ...INP, width: 44 }} /></td><td style={{ ...TD, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fK(contractDepositTimesRooms(ef))}</td><td style={{ ...TD, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fK(contractRentTimesRooms(ef))}</td><td style={TD}><input type="date" value={ef.moveDate} onChange={e => setEf({ ...ef, moveDate: e.target.value })} style={{ ...INP, width: 120 }} /></td><td style={TD}><select value={ef.status} onChange={e => setEf({ ...ef, status: e.target.value })} style={{ ...INP, width: 56 }}><option>확정</option><option>예정</option></select></td><td></td><td style={TD}><div style={{ display: "flex", gap: 2 }}><button onClick={() => { const wk = ef.moveDate ? getWeekStr(ef.moveDate) : ef.week; onSave({ ...data, contracts: data.contracts.map(x => x.id === eid ? { ...ef, week: wk || ef.week } : x) }); setEid(null); }} style={BTN}>저장</button><button onClick={() => setEid(null)} style={{ ...BTN, background: "#e2e8f0", color: "#475569" }}>취소</button></div></td></tr>);
+            return (<tr key={c.id} style={{ borderBottom: "1px solid #e2e8f0", opacity: c.visible ? 1 : .4, background: c.type === "퇴실" ? "#fef2f2" : "" }}><td style={{ ...TD, fontSize: 12, color: weekTdColor(c.week) }}>{formatKoMonthWeekLabel(c.week)}</td><td style={{ ...TD, fontWeight: 600 }}>{c.month}</td><td style={TD}><Badge color={c.type === "입주" ? "green" : c.type === "퇴실" ? "red" : c.type === "예정" ? "amber" : "blue"}>{c.type}</Badge></td><td style={{ ...TD, fontWeight: 500 }}>{c.company}</td><td style={{ ...TD, textAlign: "right" }}>{fK(c.deposit)}</td><td style={{ ...TD, textAlign: "right" }}>{fK(c.rent)}</td><td style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#2563eb" }}>{c.rooms}</td><td style={{ ...TD, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fK(contractDepositTimesRooms(c))}</td><td style={{ ...TD, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fK(contractRentTimesRooms(c))}</td><td style={{ ...TD, fontSize: 10 }}>{c.moveDate}</td><td style={TD}><Badge color={c.status === "확정" ? "green" : "amber"}>{c.status}</Badge></td><td style={TD}><button onClick={() => onSave({ ...data, contracts: data.contracts.map(x => x.id === c.id ? { ...x, visible: !x.visible } : x) })} style={{ ...BTN, background: c.visible ? "#dcfce7" : "#fee2e2", color: c.visible ? "#16a34a" : "#dc2626", fontSize: 9 }}>{c.visible ? "표시" : "숨김"}</button></td><td style={TD}><div style={{ display: "flex", gap: 2 }}><button onClick={() => { setEid(c.id); setEf({ ...c }); }} style={{ ...BTN, background: "#eff6ff", color: "#2563eb" }}>수정</button><button onClick={() => onSave({ ...data, contracts: data.contracts.filter(x => x.id !== c.id) })} style={{ ...BTN, background: "#fef2f2", color: "#dc2626" }}>삭제</button></div></td></tr>);
           })}</tbody>
         </table>
       </Card>
@@ -1252,7 +1395,7 @@ function ContractMgr({ data, onSave, readOnly }) {
   );
 }
 
-function ReportView({ data }) {
+function ReportView({ data, onSave, readOnly }) {
   const sheetRef = useRef(null);
   const ptShellRef = useRef(null);
   const ptWrapRef = useRef(null);
@@ -1270,7 +1413,7 @@ function ReportView({ data }) {
   /** PT: 왼쪽/오른쪽 끝에 있을 때만 컨트롤 표시 */
   const [ptEdgeZone, setPtEdgeZone] = useState(null);
   const PT_EDGE_PX = 72;
-  const { rooms, contracts, daewon, prevRooms, notes, reportDate, roomList } = data;
+  const { rooms, contracts, daewon, prevRooms, reportDate, roomList } = data;
   const dw = daewon || initData.daewon;
   const prev = prevRooms || initData.prevRooms;
   const tot = {}; FKEYS.forEach(k => { tot[k] = Object.values(rooms).reduce((s, r) => s + (r[k] || 0), 0); });
@@ -1289,9 +1432,80 @@ function ReportView({ data }) {
   const totalS = listGrand != null ? listGrand : Object.values(rooms).reduce((s, r) => s + sumRoom(r), 0);
   const pTotalS = Object.values(prev).reduce((s, r) => s + sumRoom(r), 0);
 
-  const ms = {}; contracts.filter(c => c.visible).forEach(c => { if (!ms[c.month]) ms[c.month] = { dep: 0, rent: 0, rooms: 0, miD: 0, miR: 0, miRm: 0, exD: 0, exR: 0, exRm: 0, outD: 0, outR: 0, outRm: 0 }; const m = ms[c.month]; if (c.type === "기존") { m.dep += c.deposit; m.rent += c.rent; m.rooms += c.rooms; } else if (c.type === "입주") { m.miD += c.deposit; m.miR += c.rent; m.miRm += c.rooms; } else if (c.type === "예정") { m.exD += c.deposit; m.exR += c.rent; m.exRm += c.rooms; } else if (c.type === "퇴실") { m.outD += c.deposit; m.outR += c.rent; m.outRm += c.rooms; } });
+  const ms = {};
+  contracts.filter((c) => c.visible).forEach((c) => {
+    if (!ms[c.month]) {
+      ms[c.month] = {
+        dep: 0, rent: 0, rooms: 0, miD: 0, miR: 0, miRm: 0, exD: 0, exR: 0, exRm: 0, outD: 0, outR: 0, outRm: 0,
+        insDepProd: 0, insRentProd: 0, miDepProd: 0, miRentProd: 0,
+      };
+    }
+    const m = ms[c.month];
+    const d = Number(c.deposit) || 0;
+    const r = Number(c.rent) || 0;
+    const rm = Number(c.rooms) || 0;
+    const dp = d * rm;
+    const rp = r * rm;
+    if (c.type === "기존") {
+      m.dep += d; m.rent += r; m.rooms += rm;
+      m.insDepProd += dp; m.insRentProd += rp;
+    } else if (c.type === "입주") {
+      if (isInspireLineContract(c.company)) {
+        m.dep += d; m.rent += r; m.rooms += rm;
+        m.insDepProd += dp; m.insRentProd += rp;
+      } else {
+        m.miD += d; m.miR += r; m.miRm += rm;
+        m.miDepProd += dp; m.miRentProd += rp;
+      }
+    } else if (c.type === "예정") {
+      m.exD += d; m.exR += r; m.exRm += rm;
+    } else if (c.type === "퇴실") {
+      m.outD += d; m.outR += r; m.outRm += rm;
+    }
+  });
 
-  function gRev(month, key) { const m = ms[month] || { dep: 0, rent: 0, rooms: 0, miD: 0, miR: 0, miRm: 0, exD: 0, exR: 0, exRm: 0, outD: 0, outR: 0, outRm: 0 }; if (key === "total") return { d: m.dep + m.miD + m.exD, r: m.rent + m.miR + m.exR, rm: m.rooms + m.miRm + m.exRm }; if (key === "ins") return { d: m.dep, r: m.rent, rm: m.rooms }; if (key === "mi") return { d: m.miD, r: m.miR, rm: m.miRm }; if (key === "ex") return { d: m.exD, r: m.exR, rm: m.exRm }; if (key === "out") return { d: m.outD, r: m.outR, rm: m.outRm }; return { d: 0, r: 0, rm: 0 }; }
+  const reportYearForList = (() => {
+    if (!reportDate) return new Date().getFullYear();
+    const d = new Date(reportDate);
+    return isNaN(d.getTime()) ? new Date().getFullYear() : d.getFullYear();
+  })();
+  if (Array.isArray(roomList)) {
+    roomList.forEach((row) => {
+      if (isStayTypeForbidden(row.stayType)) return;
+      const od = parseRoomListOpEndDateCell(row.opEnd);
+      if (!od || od.getFullYear() !== reportYearForList) return;
+      const ml = `${od.getMonth() + 1}월`;
+      if (!ms[ml]) {
+        ms[ml] = {
+          dep: 0, rent: 0, rooms: 0, miD: 0, miR: 0, miRm: 0, exD: 0, exR: 0, exRm: 0, outD: 0, outR: 0, outRm: 0,
+          insDepProd: 0, insRentProd: 0, miDepProd: 0, miRentProd: 0,
+        };
+      }
+      const m = ms[ml];
+      m.outD += Math.round(Number(row.deposit) || 0);
+      m.outR += Math.round(Number(row.rent) || 0);
+      m.outRm += 1;
+    });
+  }
+
+  function gRev(month, key) {
+    const m = ms[month] || {
+      dep: 0, rent: 0, rooms: 0, miD: 0, miR: 0, miRm: 0, exD: 0, exR: 0, exRm: 0, outD: 0, outR: 0, outRm: 0,
+      insDepProd: 0, insRentProd: 0, miDepProd: 0, miRentProd: 0,
+    };
+    /** 합 계 = 인스파이어 + 신규입주 + 예정 (퇴실·위탁목록 합산은 별도). 금액은 각 행과 동일한 기준(인스/신규=Σ(단가×실수), 예정=Σ단가). */
+    if (key === "total")
+      return {
+        d: m.insDepProd + m.miDepProd + m.exD,
+        r: m.insRentProd + m.miRentProd + m.exR,
+        rm: m.rooms + m.miRm + m.exRm,
+      };
+    if (key === "ins") return { d: m.insDepProd, r: m.insRentProd, rm: m.rooms };
+    if (key === "mi") return { d: m.miDepProd, r: m.miRentProd, rm: m.miRm };
+    if (key === "ex") return { d: m.exD, r: m.exR, rm: m.exRm };
+    if (key === "out") return { d: m.outD, r: m.outR, rm: m.outRm };
+    return { d: 0, r: 0, rm: 0 };
+  }
 
   function gRevWithList(month, key) {
     const base = gRev(month, key);
@@ -1301,13 +1515,85 @@ function ReportView({ data }) {
 
   const moveIns = contracts.filter(c => c.visible && (c.type === "입주" || c.type === "예정"));
   const mG = {}; moveIns.forEach(c => { if (!mG[c.month]) mG[c.month] = []; mG[c.month].push(c); });
-  const months = ["2월", "3월", "4월"];
+  /** 월별 계약 표: 전월 + 기준월 + 다음달(예정) */
+  const months = useMemo(() => {
+    const ds = reportDate;
+    const d = ds ? new Date(ds) : new Date();
+    const base = isNaN(d.getTime()) ? new Date() : d;
+    const y = base.getFullYear();
+    const mo = base.getMonth();
+    const prevD = new Date(y, mo - 1, 1);
+    const prv = `${prevD.getMonth() + 1}월`;
+    const cur = `${mo + 1}월`;
+    const nextD = new Date(y, mo + 1, 1);
+    const nxt = `${nextD.getMonth() + 1}월`;
+    return [prv, cur, nxt];
+  }, [reportDate]);
+  /** 입주예정 표: 기준월 + 다음달만 */
+  const moveInTableMonths = useMemo(() => {
+    const ds = reportDate;
+    const d = ds ? new Date(ds) : new Date();
+    const base = isNaN(d.getTime()) ? new Date() : d;
+    const y = base.getFullYear();
+    const mo = base.getMonth();
+    const cur = `${mo + 1}월`;
+    const nextD = new Date(y, mo + 1, 1);
+    const nxt = `${nextD.getMonth() + 1}월`;
+    return [cur, nxt];
+  }, [reportDate]);
   const revRows = [{ label: "합 계", key: "total", bold: true }, { label: "인스파이어", key: "ins" }, { label: "신규입주", key: "mi" }, { label: "예 정", key: "ex" }, { label: "퇴 실", key: "out" }];
+
+  const moveInLine = (items, status) =>
+    items.filter((c) => c.status === status).map((c) => `${c.company}(${c.rooms}실)`).join(", ") || "-";
+  const getMoveInText = (month, field) => {
+    const m = data.reportMoveInCells?.[month];
+    const items = mG[month] || [];
+    if (field === "confirmed") {
+      if (m?.confirmed !== undefined) return m.confirmed;
+      return moveInLine(items, "확정");
+    }
+    if (field === "scheduled") {
+      if (m?.scheduled !== undefined) return m.scheduled;
+      return moveInLine(items, "예정");
+    }
+    if (m?.note !== undefined) return m.note;
+    return "-";
+  };
+  const patchMoveInCell = (month, field, text) => {
+    if (!onSave || readOnly) return;
+    const prev = data.reportMoveInCells || {};
+    const mo = { ...(prev[month] || {}) };
+    const trimmed = String(text ?? "").trim();
+    if (trimmed === "") delete mo[field];
+    else mo[field] = text;
+    const next = { ...prev };
+    if (Object.keys(mo).length === 0) delete next[month];
+    else next[month] = mo;
+    onSave({ reportMoveInCells: next });
+  };
+
+  const moveInInputSx = {
+    width: "100%",
+    minWidth: 0,
+    boxSizing: "border-box",
+    fontSize: 11,
+    padding: "3px 6px",
+    border: "1px solid #94a3b8",
+    borderRadius: 4,
+    height: 26,
+    lineHeight: 1.25,
+    fontFamily: "inherit",
+  };
 
   const hc = { padding: "9px 10px", border: "1px solid #888", textAlign: "center", fontSize: 12, fontWeight: 700, background: "#fffff0", whiteSpace: "nowrap", lineHeight: "1.35" };
   const rc = (bg, bold, color) => ({ padding: "8px 10px", border: "1px solid #aaa", textAlign: "right", fontSize: "12px", background: bg || "#fff", fontWeight: bold ? 700 : 400, color: color || "#000", whiteSpace: "nowrap", lineHeight: "1.4" });
   const rcc = (bg, bold) => ({ ...rc(bg, bold), textAlign: "center" });
   const drc = (color) => ({ padding: "6px 8px", border: "1px solid #ccc", textAlign: "right", fontSize: 10, background: "#fafafa", fontWeight: 600, lineHeight: "1.35", whiteSpace: "nowrap", color: color || "#888" });
+  /** 위탁운영 객실현황 표만 셀 높이 확대(인쇄 미리보기·참고안과 유사) */
+  const hcMain = { ...hc, padding: "13px 11px", lineHeight: "1.44" };
+  const rcMain = (bg, bold, color) => ({ ...rc(bg, bold, color), padding: "12px 11px", lineHeight: "1.48" });
+  const rccMain = (bg, bold) => ({ ...rcc(bg, bold), padding: "12px 11px", lineHeight: "1.48" });
+  const drcMain = (color) => ({ ...drc(color), padding: "10px 11px", lineHeight: "1.42" });
 
   useEffect(() => { if (!ptMode) setPtHover(null); }, [ptMode]);
   useEffect(() => { if (!ptMode) setPtSlideIndex(0); }, [ptMode]);
@@ -1538,20 +1824,25 @@ function ReportView({ data }) {
   }, [ptMode, ptSlideIndex, syncHlCanvas]);
 
   useEffect(() => {
-    const el = sheetRef.current;
-    if (!el) return;
     const mmToPx = (mm) => (mm * 96) / 25.4;
+    /** @page margin 과 동일해야 인쇄 시 한 페이지 맞춤이 정확함 */
+    const PRINT_MARGIN_MM = 5;
     const printableSizePx = () => ({
-      w: mmToPx(297 - 12 - 12),
-      h: mmToPx(210 - 6 - 6),
+      w: mmToPx(297 - PRINT_MARGIN_MM - PRINT_MARGIN_MM),
+      h: mmToPx(210 - PRINT_MARGIN_MM - PRINT_MARGIN_MM),
     });
+    const getEl = () => sheetRef.current;
     const clearFit = () => {
+      const el = getEl();
+      if (!el) return;
       el.style.removeProperty("zoom");
       el.style.removeProperty("transform");
       el.style.removeProperty("transform-origin");
       el.style.removeProperty("width");
     };
     const applyFit = () => {
+      const el = getEl();
+      if (!el) return;
       clearFit();
       void el.offsetHeight;
       const { w: pageW, h: pageH } = printableSizePx();
@@ -1561,12 +1852,12 @@ function ReportView({ data }) {
       let s = 1;
       if (ch > pageH) s = Math.min(s, pageH / ch);
       if (cw > pageW) s = Math.min(s, pageW / cw);
-      s = Math.min(1, s * 0.99);
-      if (s >= 0.997) {
+      s = Math.min(1, s * 0.96);
+      if (s >= 0.998) {
         clearFit();
         return;
       }
-      s = Math.max(0.42, s);
+      s = Math.max(0.25, s);
       const ua = navigator.userAgent;
       const useZoom = (/Chrome|Edg|OPR|SamsungBrowser/i.test(ua) || /Safari/i.test(ua)) && !/Firefox/i.test(ua);
       if (useZoom) {
@@ -1578,7 +1869,13 @@ function ReportView({ data }) {
       el.style.width = `${(100 / s).toFixed(3)}%`;
     };
     const scheduleFit = () => {
-      requestAnimationFrame(() => requestAnimationFrame(applyFit));
+      const run = () => {
+        applyFit();
+        requestAnimationFrame(applyFit);
+        setTimeout(applyFit, 0);
+        setTimeout(applyFit, 72);
+      };
+      requestAnimationFrame(() => requestAnimationFrame(run));
     };
     const onAfter = () => {
       clearFit();
@@ -1597,7 +1894,7 @@ function ReportView({ data }) {
       mq.removeEventListener("change", onMq);
       clearFit();
     };
-  }, []);
+  }, [ptMode]);
 
   const exitPt = useCallback(() => {
     if (document.exitFullscreen) {
@@ -1664,9 +1961,14 @@ function ReportView({ data }) {
 
   const reportInner = (
     <>
-        <h1 style={{ textAlign: "center", fontSize: 20, fontWeight: 800, marginTop: 0, marginBottom: 10, letterSpacing: 2 }}>장기 숙박 유치 현황</h1>
+        <h1 className="title" style={{ textAlign: "center", fontSize: 20, fontWeight: 800, marginTop: 0, marginBottom: 0, letterSpacing: 2 }}>장기 숙박 유치 현황</h1>
 
-        <div className="report-head-row" style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><b style={{ fontSize: 13 }}>○ 위탁운영 객실현황</b><span style={{ fontSize: 10, color: "#666" }}>기준 : {reportDate}</span></div>
+        <div className="report-sheet-sections">
+        <div
+          className="section report-table-section"
+          style={{ marginTop: "6px", marginBottom: "6px", display: "block" }}
+        >
+        <div className="report-head-row section-title report-subhead" style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><b style={{ fontSize: 13 }}>○ 위탁운영 객실현황</b><span style={{ fontSize: 10, color: "#666" }}>기준 : {reportDate}</span></div>
         <table className="report-table-main" style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 2 }}>
           <colgroup>
             <col style={{ width: "5.2%" }} />
@@ -1684,49 +1986,55 @@ function ReportView({ data }) {
             <col style={{ width: "6.7%" }} />
           </colgroup>
           <thead>
-            <tr><th style={hc} rowSpan={2}>차수</th><th style={hc} rowSpan={2}>합계</th><th style={{ ...hc, background: "#e8f0fe" }} colSpan={5}>장기숙박</th><th style={hc} rowSpan={2}>호텔</th><th style={{ ...hc, whiteSpace: "normal", lineHeight: 1.25 }} rowSpan={2}><span style={{ borderBottom: "1px solid #333", display: "inline-block", paddingBottom: 1 }}>기숙사</span><br /><span style={{ fontSize: "0.95em" }}>(자산)</span></th><th style={{ ...hc, background: "#e6f4ea" }} colSpan={3}>공실(판매가능)</th><th style={{ ...hc, background: "#fce8e6" }} rowSpan={2}>판매불가</th></tr>
-            <tr><th style={{ ...hc, background: "#e8f0fe" }}>계</th><th style={{ ...hc, background: "#e8f0fe" }}>인스</th><th style={{ ...hc, background: "#e8f0fe" }}>샤프</th><th style={{ ...hc, background: "#e8f0fe" }}>기타</th><th style={{ ...hc, background: "#e8f0fe" }}>개인</th><th style={{ ...hc, background: "#e6f4ea" }}>공실</th><th style={{ ...hc, background: "#e6f4ea" }}>입실</th><th style={{ ...hc, background: "#e6f4ea" }}>보수</th></tr>
+            <tr><th style={hcMain} rowSpan={2}>차수</th><th style={hcMain} rowSpan={2}>합계</th><th style={{ ...hcMain, background: "#e8f0fe" }} colSpan={5}>장기숙박</th><th style={hcMain} rowSpan={2}>호텔</th><th style={{ ...hcMain, whiteSpace: "normal", lineHeight: 1.25 }} rowSpan={2}><span style={{ borderBottom: "1px solid #333", display: "inline-block", paddingBottom: 1 }}>기숙사</span><br /><span style={{ fontSize: "0.95em" }}>(자산)</span></th><th style={{ ...hcMain, background: "#e6f4ea" }} colSpan={3}>공실(판매가능)</th><th style={{ ...hcMain, background: "#fce8e6" }} rowSpan={2}>판매불가</th></tr>
+            <tr><th style={{ ...hcMain, background: "#e8f0fe" }}>계</th><th style={{ ...hcMain, background: "#e8f0fe" }}>인스</th><th style={{ ...hcMain, background: "#e8f0fe" }}>샤프</th><th style={{ ...hcMain, background: "#e8f0fe" }}>기타</th><th style={{ ...hcMain, background: "#e8f0fe" }}>개인</th><th style={{ ...hcMain, background: "#e6f4ea" }}>공실</th><th style={{ ...hcMain, background: "#e6f4ea" }}>입실</th><th style={{ ...hcMain, background: "#e6f4ea" }}>보수</th></tr>
           </thead>
           <tbody>
-            <tr style={{ background: "#f0f0f0" }}><td style={rcc("#eee", true)}>합계</td><td {...ptWeekCellProps(rc("#eee", true, "#c00"), totalS, pTotalS)}>{fN(totalS)}</td><td {...ptWeekCellProps(rc("#e8e8e8", true, "#c00"), longStay(tot), longStay(pTot))}>{fN(tot.inspire + tot.sharp + tot.etcCorp + tot.personal)}</td>{["inspire", "sharp", "etcCorp", "personal"].map(k => <td key={k} {...ptWeekCellProps(rc("#eee", true), tot[k], pTot[k])}>{fN(tot[k])}</td>)}<td {...ptWeekCellProps(rc("#eee", true), tot.hotel, pTot.hotel)}>{fN(tot.hotel)}</td><td {...ptWeekCellProps(rc("#eee", true), tot.dormAsset, pTot.dormAsset)}>{fN(tot.dormAsset)}</td><td {...ptWeekCellProps(rc("#eee", true), tot.empty, pTot.empty)}>{fN(tot.empty)}</td><td {...ptWeekCellProps(rc("#eee", true), tot.moveIn, pTot.moveIn)}>{fN(tot.moveIn)}</td><td {...ptWeekCellProps(rc("#eee", true), tot.repair, pTot.repair)}>{fN(tot.repair)}</td><td {...ptWeekCellProps(rc("#eee", true, "#c00"), tot.badRepair, pTot.badRepair)}>{fN(tot.badRepair)}</td></tr>
+            <tr style={{ background: "#f0f0f0" }}><td style={rccMain("#eee", true)}>합계</td><td {...ptWeekCellProps(rcMain("#eee", true, "#c00"), totalS, pTotalS)}>{fN(totalS)}</td><td {...ptWeekCellProps(rcMain("#e8e8e8", true, "#c00"), longStay(tot), longStay(pTot))}>{fN(tot.inspire + tot.sharp + tot.etcCorp + tot.personal)}</td>{["inspire", "sharp", "etcCorp", "personal"].map(k => <td key={k} {...ptWeekCellProps(rcMain("#eee", true), tot[k], pTot[k])}>{fN(tot[k])}</td>)}<td {...ptWeekCellProps(rcMain("#eee", true), tot.hotel, pTot.hotel)}>{fN(tot.hotel)}</td><td {...ptWeekCellProps(rcMain("#eee", true), tot.dormAsset, pTot.dormAsset)}>{fN(tot.dormAsset)}</td><td {...ptWeekCellProps(rcMain("#eee", true), tot.empty, pTot.empty)}>{fN(tot.empty)}</td><td {...ptWeekCellProps(rcMain("#eee", true), tot.moveIn, pTot.moveIn)}>{fN(tot.moveIn)}</td><td {...ptWeekCellProps(rcMain("#eee", true), tot.repair, pTot.repair)}>{fN(tot.repair)}</td><td {...ptWeekCellProps(rcMain("#eee", true, "#c00"), tot.badRepair, pTot.badRepair)}>{fN(tot.badRepair)}</td></tr>
             {Object.entries(rooms).map(([cha, r]) => {
               const rowSum = chaListTotals ? (chaListTotals[cha] ?? 0) : sumRoom(r);
               const pr = prev[cha] || emptyRoomCounts();
               const prevRowSum = sumRoom(pr);
-              return (<tr key={cha}><td style={rcc(null, true)}>{cha}</td><td {...ptWeekCellProps(rc(null, true), rowSum, prevRowSum)}>{fN(rowSum)}</td><td {...ptWeekCellProps(rc("#f5f5f5", true), longStay(r), longStay(pr))}>{fN(longStay(r))}</td><td {...ptWeekCellProps(rc(), r.inspire, pr.inspire)}>{fN(r.inspire)}</td><td {...ptWeekCellProps(rc(), r.sharp, pr.sharp)}>{fN(r.sharp)}</td><td {...ptWeekCellProps(rc(), r.etcCorp, pr.etcCorp)}>{fN(r.etcCorp)}</td><td {...ptWeekCellProps(rc(), r.personal, pr.personal)}>{fN(r.personal)}</td><td {...ptWeekCellProps(rc(null, false, "#888"), r.hotel, pr.hotel)}>{fN(r.hotel)}</td><td {...ptWeekCellProps(rc(null, false, "#888"), r.dormAsset, pr.dormAsset)}>{fN(r.dormAsset)}</td><td {...ptWeekCellProps(rc(), r.empty, pr.empty)}>{fN(r.empty)}</td><td {...ptWeekCellProps(rc(), r.moveIn, pr.moveIn)}>{fN(r.moveIn)}</td><td {...ptWeekCellProps(rc(), r.repair, pr.repair)}>{fN(r.repair)}</td><td {...ptWeekCellProps(rc(null, false, "#c00"), r.badRepair, pr.badRepair)}>{fN(r.badRepair)}</td></tr>);
+              return (<tr key={cha}><td style={rccMain(null, true)}>{cha}</td><td {...ptWeekCellProps(rcMain(null, true), rowSum, prevRowSum)}>{fN(rowSum)}</td><td {...ptWeekCellProps(rcMain("#f5f5f5", true), longStay(r), longStay(pr))}>{fN(longStay(r))}</td><td {...ptWeekCellProps(rcMain(), r.inspire, pr.inspire)}>{fN(r.inspire)}</td><td {...ptWeekCellProps(rcMain(), r.sharp, pr.sharp)}>{fN(r.sharp)}</td><td {...ptWeekCellProps(rcMain(), r.etcCorp, pr.etcCorp)}>{fN(r.etcCorp)}</td><td {...ptWeekCellProps(rcMain(), r.personal, pr.personal)}>{fN(r.personal)}</td><td {...ptWeekCellProps(rcMain(null, false, "#888"), r.hotel, pr.hotel)}>{fN(r.hotel)}</td><td {...ptWeekCellProps(rcMain(null, false, "#888"), r.dormAsset, pr.dormAsset)}>{fN(r.dormAsset)}</td><td {...ptWeekCellProps(rcMain(), r.empty, pr.empty)}>{fN(r.empty)}</td><td {...ptWeekCellProps(rcMain(), r.moveIn, pr.moveIn)}>{fN(r.moveIn)}</td><td {...ptWeekCellProps(rcMain(), r.repair, pr.repair)}>{fN(r.repair)}</td><td {...ptWeekCellProps(rcMain(null, false, "#c00"), r.badRepair, pr.badRepair)}>{fN(r.badRepair)}</td></tr>);
             })}
-            <tr style={{ background: "#fafafa" }}><td style={rcc("#f5f5f5", true)}>전주대비</td><td {...ptWeekCellProps(drc(diffVal(totalS, pTotalS).c), totalS, pTotalS)}>{diffVal(totalS, pTotalS).t}</td><td {...ptWeekCellProps(drc(diffVal(longStay(tot), longStay(pTot)).c), longStay(tot), longStay(pTot))}>{diffVal(longStay(tot), longStay(pTot)).t}</td>{ROOM_TABLE_FIELDS.map(f => <td key={f.k} {...ptWeekCellProps(drc(diffVal(tot[f.k], pTot[f.k]).c), tot[f.k], pTot[f.k])}>{diffVal(tot[f.k], pTot[f.k]).t}</td>)}</tr>
-            <tr><td style={rcc(null, false)}>대원소유분</td><td {...ptWeekCellProps(rc(null, true), daewonListTotal != null ? daewonListTotal : sumRoom(dw), 0, false)}>{fN(daewonListTotal != null ? daewonListTotal : sumRoom(dw))}</td><td {...ptWeekCellProps(rc("#f5f5f5", true), longStay(dw), 0, false)}>{fN(longStay(dw))}</td><td {...ptWeekCellProps(rc(), dw.inspire, 0, false)}>{fN(dw.inspire)}</td><td {...ptWeekCellProps(rc(), dw.sharp, 0, false)}>{fN(dw.sharp)}</td><td {...ptWeekCellProps(rc(), dw.etcCorp, 0, false)}>{fN(dw.etcCorp)}</td><td {...ptWeekCellProps(rc(), dw.personal, 0, false)}>{fN(dw.personal)}</td><td {...ptWeekCellProps(rc(null, false, "#888"), dw.hotel, 0, false)}>{fN(dw.hotel)}</td><td {...ptWeekCellProps(rc(null, false, "#888"), dw.dormAsset, 0, false)}>{fN(dw.dormAsset)}</td><td {...ptWeekCellProps(rc(), dw.empty, 0, false)}>{fN(dw.empty)}</td><td {...ptWeekCellProps(rc(), dw.moveIn, 0, false)}>{fN(dw.moveIn)}</td><td {...ptWeekCellProps(rc(), dw.repair, 0, false)}>{fN(dw.repair)}</td><td {...ptWeekCellProps(rc(null, false, "#c00"), dw.badRepair, 0, false)}>{fN(dw.badRepair)}</td></tr>
+            <tr style={{ background: "#fafafa" }}><td style={rccMain("#f5f5f5", true)}>전주대비</td><td {...ptWeekCellProps(drcMain(diffVal(totalS, pTotalS).c), totalS, pTotalS)}>{diffVal(totalS, pTotalS).t}</td><td {...ptWeekCellProps(drcMain(diffVal(longStay(tot), longStay(pTot)).c), longStay(tot), longStay(pTot))}>{diffVal(longStay(tot), longStay(pTot)).t}</td>{ROOM_TABLE_FIELDS.map(f => <td key={f.k} {...ptWeekCellProps(drcMain(diffVal(tot[f.k], pTot[f.k]).c), tot[f.k], pTot[f.k])}>{diffVal(tot[f.k], pTot[f.k]).t}</td>)}</tr>
+            <tr><td className="report-daewon-label" style={{ ...rccMain(null, false), padding: "13px 11px", verticalAlign: "middle", lineHeight: 1.45, whiteSpace: "normal", wordBreak: "keep-all", boxSizing: "border-box" }}>대원소유분</td><td {...ptWeekCellProps(rcMain(null, true), daewonListTotal != null ? daewonListTotal : sumRoom(dw), 0, false)}>{fN(daewonListTotal != null ? daewonListTotal : sumRoom(dw))}</td><td {...ptWeekCellProps(rcMain("#f5f5f5", true), longStay(dw), 0, false)}>{fN(longStay(dw))}</td><td {...ptWeekCellProps(rcMain(), dw.inspire, 0, false)}>{fN(dw.inspire)}</td><td {...ptWeekCellProps(rcMain(), dw.sharp, 0, false)}>{fN(dw.sharp)}</td><td {...ptWeekCellProps(rcMain(), dw.etcCorp, 0, false)}>{fN(dw.etcCorp)}</td><td {...ptWeekCellProps(rcMain(), dw.personal, 0, false)}>{fN(dw.personal)}</td><td {...ptWeekCellProps(rcMain(null, false, "#888"), dw.hotel, 0, false)}>{fN(dw.hotel)}</td><td {...ptWeekCellProps(rcMain(null, false, "#888"), dw.dormAsset, 0, false)}>{fN(dw.dormAsset)}</td><td {...ptWeekCellProps(rcMain(), dw.empty, 0, false)}>{fN(dw.empty)}</td><td {...ptWeekCellProps(rcMain(), dw.moveIn, 0, false)}>{fN(dw.moveIn)}</td><td {...ptWeekCellProps(rcMain(), dw.repair, 0, false)}>{fN(dw.repair)}</td><td {...ptWeekCellProps(rcMain(null, false, "#c00"), dw.badRepair, 0, false)}>{fN(dw.badRepair)}</td></tr>
           </tbody>
         </table>
-        {notes && <p style={{ fontSize: 10, color: "#555", margin: "6px 0 10px" }}>※ 비고 : {notes}</p>}
-
-        <div className="report-head-row" style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><b style={{ fontSize: 13 }}>○ 장기 숙박 월별 계약 현황 및 예상 임대 수익</b><span style={{ fontSize: 10, color: "#666" }}>단위:원</span></div>
+        </div>
+        <div
+          className="section report-table-section"
+          style={{ marginTop: "8px", marginBottom: "4px", display: "block" }}
+        >
+        <div className="report-head-row section-title report-subhead" style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+          <b style={{ fontSize: 13 }}>○ 장기 숙박 월별 계약 현황 및 예상 임대 수익</b>
+          <span style={{ fontSize: 10, color: "#666" }}>단위:원</span>
+        </div>
         {(listMoney.deposit > 0 || listMoney.rent > 0) && reportMonthKey && months.includes(reportMonthKey) ? (
-          <p style={{ fontSize: 10, color: "#555", margin: "0 0 6px" }}>※ 기준일 월({reportMonthKey}) 「합 계」행 보증금·임대료에 위탁 객실목록 합계(보증금 {fN(listMoney.deposit)}, 임대료 {fN(listMoney.rent)})를 더해 표시합니다.</p>
+          <p style={{ fontSize: 10, color: "#555", margin: "0 0 6px" }}>※ 기준일 월({reportMonthKey}) 「합 계」행 보증금·임대료에 위탁 객실목록 합계(보증금 {fK(listMoney.deposit)}, 임대료 {fK(listMoney.rent)})를 더해 표시합니다.</p>
         ) : (listMoney.deposit > 0 || listMoney.rent > 0) && reportMonthKey && !months.includes(reportMonthKey) ? (
-          <p style={{ fontSize: 10, color: "#555", margin: "0 0 6px" }}>※ 위탁 객실목록 합계: 보증금 {fN(listMoney.deposit)}, 월 임대료 {fN(listMoney.rent)} (표 월이 {reportMonthKey}와 다르면 합계 행에 자동 합산되지 않습니다)</p>
+          <p style={{ fontSize: 10, color: "#555", margin: "0 0 6px" }}>※ 위탁 객실목록 합계: 보증금 {fK(listMoney.deposit)}, 월 임대료 {fK(listMoney.rent)} (표 월이 {reportMonthKey}와 다르면 합계 행에 자동 합산되지 않습니다)</p>
         ) : null}
         <table className="report-table-rev" style={{ width: "100%", borderCollapse: "collapse", marginBottom: 2 }}>
           <thead>
-            <tr><th style={hc}>구분</th>{months.map((m, i) => <th key={m} style={hc} colSpan={3}>{m}{i === 2 ? " (예정)" : ""}</th>)}</tr>
+            <tr><th style={hc}>구분</th>{months.map((m, i) => <th key={m} style={hc} colSpan={3}>{m}{i === months.length - 1 ? " (예정)" : ""}</th>)}</tr>
             <tr><th style={hc}></th>{months.map(m => <React.Fragment key={m}><th style={hc}>보증금</th><th style={hc}>임대료</th><th style={hc}>객실수</th></React.Fragment>)}</tr>
           </thead>
           <tbody>
-            {revRows.map(row => (
+            {revRows.map((row) => (
               <tr key={row.key} style={{ background: row.bold ? "#f0f0f0" : "" }}>
                 <td style={rcc(row.bold ? "#eee" : null, row.bold)}>{row.label}</td>
                 {months.map((month, mi) => {
-                  const d = gRevWithList(month, row.key);
+                  const cur = gRevWithList(month, row.key);
                   const pd = mi > 0 ? gRevWithList(months[mi - 1], row.key) : null;
                   const hasPrev = mi > 0;
                   const sR = rc(row.bold ? "#eee" : null, row.bold);
                   const sC = rcc(row.bold ? "#eee" : null, row.bold);
                   return (
                     <React.Fragment key={month}>
-                      <td {...ptMonthCellProps(sR, d.d, pd?.d ?? 0, "money", hasPrev)}>{d.d ? fN(d.d) : "-"}</td>
-                      <td {...ptMonthCellProps(sR, d.r, pd?.r ?? 0, "money", hasPrev)}>{d.r ? fN(d.r) : "-"}</td>
-                      <td {...ptMonthCellProps(sC, d.rm, pd?.rm ?? 0, "rooms", hasPrev)}>{d.rm || "-"}</td>
+                      <td {...ptMonthCellProps(sR, cur.d, pd?.d ?? 0, "money", hasPrev)}>{cur.d ? fK(cur.d) : "-"}</td>
+                      <td {...ptMonthCellProps(sR, cur.r, pd?.r ?? 0, "money", hasPrev)}>{cur.r ? fK(cur.r) : "-"}</td>
+                      <td {...ptMonthCellProps(sC, cur.rm, pd?.rm ?? 0, "rooms", hasPrev)}>{cur.rm || "-"}</td>
                     </React.Fragment>
                   );
                 })}
@@ -1734,30 +2042,93 @@ function ReportView({ data }) {
             ))}
           </tbody>
         </table>
-
-        <b style={{ fontSize: 13, display: "block", margin: "10px 0 6px" }}>○ 입주예정 객실</b>
-        <table className="report-movein" style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginBottom: 16 }}>
+        </div>
+        <div className="report-sheet-vertical-spacer" aria-hidden="true" />
+        <div
+          className="section report-table-section report-movein-compact"
+          style={{ marginTop: "8px", marginBottom: "12px", display: "block" }}
+        >
+        <b className="section-title report-subhead" style={{ fontSize: 13, display: "block", marginBottom: 4 }}>○ 입주예정 객실</b>
+        <div className="report-movein-zoom-wrap">
+        <table className="report-movein" style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse", marginTop: 4, marginBottom: 0 }}>
           <colgroup>
             <col style={{ width: "5%" }} />
-            <col style={{ width: "31.67%" }} />
-            <col style={{ width: "31.67%" }} />
-            <col style={{ width: "31.66%" }} />
+            <col style={{ width: "37%" }} />
+            <col style={{ width: "37%" }} />
+            <col style={{ width: "21%" }} />
           </colgroup>
           <thead><tr><th style={hc}>구분</th><th style={hc}>입주 (확정)</th><th style={hc}>예정 (구두약속)</th><th style={hc}>비고</th></tr></thead>
-          <tbody>{Object.entries(mG).map(([m, items]) => (
-            <tr key={m}>
-              <td style={{ ...rcc(null, true), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "top" }}>{m}</td>
-              <td style={{ ...rc(), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "top" }}>{items.filter(c => c.status === "확정").map(c => c.company + "(" + c.rooms + "실)").join(", ") || "-"}</td>
-              <td style={{ ...rc(), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "top" }}>{items.filter(c => c.status === "예정").map(c => c.company + "(" + c.rooms + "실)").join(", ") || "-"}</td>
-              <td style={{ ...rc(), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "top" }}>-</td>
-            </tr>
-          ))}</tbody>
+          <tbody>
+            {moveInTableMonths.map((m) => (
+              <tr key={m}>
+                <td style={{ ...rcc(null, true), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "middle" }}>{m}</td>
+                <td className="report-movein-text-col" style={{ ...rc(), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "middle" }}>
+                  {readOnly ? (
+                    getMoveInText(m, "confirmed")
+                  ) : (
+                    <input
+                      type="text"
+                      className="report-movein-cell-input"
+                      value={getMoveInText(m, "confirmed")}
+                      onChange={(e) => patchMoveInCell(m, "confirmed", e.target.value)}
+                      style={moveInInputSx}
+                    />
+                  )}
+                </td>
+                <td className="report-movein-text-col" style={{ ...rc(), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "middle" }}>
+                  {readOnly ? (
+                    getMoveInText(m, "scheduled")
+                  ) : (
+                    <input
+                      type="text"
+                      className="report-movein-cell-input"
+                      value={getMoveInText(m, "scheduled")}
+                      onChange={(e) => patchMoveInCell(m, "scheduled", e.target.value)}
+                      style={moveInInputSx}
+                    />
+                  )}
+                </td>
+                <td style={{ ...rc(), wordBreak: "break-word", whiteSpace: "normal", verticalAlign: "middle" }}>
+                  {readOnly ? (
+                    getMoveInText(m, "note")
+                  ) : (
+                    <input
+                      type="text"
+                      className="report-movein-cell-input"
+                      value={data.reportMoveInCells?.[m]?.note !== undefined ? data.reportMoveInCells[m].note : ""}
+                      onChange={(e) => patchMoveInCell(m, "note", e.target.value)}
+                      placeholder="-"
+                      style={moveInInputSx}
+                    />
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
         </table>
+        </div>
+        </div>
+        </div>
     </>
   );
 
   const sheetBaseStyle = { background: "#fff", padding: "20px 24px", fontFamily: "'맑은 고딕',sans-serif", lineHeight: "1.4", color: "#000", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" };
-  const sheetPtStyle = { ...sheetBaseStyle, padding: "26px 34px", fontSize: 15, width: "min(1180px, 92vw)", boxSizing: "border-box", boxShadow: "0 8px 48px rgba(0,0,0,.35)", zoom: 1.2 };
+  /** PT: 뷰포트 풀블리드(검은 테두리 여백 없음), 줌 제거 */
+  const sheetPtStyle = {
+    ...sheetBaseStyle,
+    padding: "clamp(10px, 1.4vw, 20px)",
+    fontSize: 15,
+    width: "100%",
+    maxWidth: "100%",
+    minHeight: "100%",
+    boxSizing: "border-box",
+    boxShadow: "none",
+    zoom: 1,
+    alignSelf: "stretch",
+    flex: "1 1 auto",
+    minHeight: 0,
+  };
+  const sheetPtAdditionalStyle = { ...sheetPtStyle, padding: "12px 14px 8px" };
 
   return (
     <div>
@@ -1765,19 +2136,239 @@ function ReportView({ data }) {
         @media screen {
           .rp { max-width: min(1100px, 100%); margin: 20px auto; padding-left: 16px; padding-right: 16px; box-sizing: border-box; }
           .report-page-row.rp { display: flex; flex-direction: row; align-items: flex-start; gap: 14px; }
+          .report-a4-chrome {
+            background: #f0f0f0 !important;
+            padding: 16px 12px 24px !important;
+            box-sizing: border-box !important;
+            border-radius: 8px;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: stretch !important;
+          }
+          .report-a4-page {
+            width: 297mm !important;
+            max-width: 100% !important;
+            height: 210mm !important;
+            min-height: 210mm !important;
+            margin: 0 auto !important;
+            background: #fff !important;
+            box-sizing: border-box !important;
+            box-shadow: 0 0 0 1px #ddd, 0 6px 28px rgba(0,0,0,.1) !important;
+            display: flex !important;
+            flex-direction: column !important;
+          }
+          .report-sheet-outer {
+            width: 100%;
+            box-sizing: border-box;
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+          }
+          .report-a4-page .report-sheet {
+            flex: 1 1 auto !important;
+            min-height: 0 !important;
+            height: 100% !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: flex-start !important;
+            padding: 8px 10px !important;
+          }
+          .report-a4-page .report-sheet-sections,
+          .report-tv-pt .report-sheet-sections {
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+          }
+          .report-a4-page .report-sheet .report-sheet-vertical-spacer,
+          .report-tv-pt .report-sheet .report-sheet-vertical-spacer {
+            flex: 1 1 auto;
+            min-height: 0;
+            width: 100%;
+          }
+          /* 월별 계약 표: 행 높이 살짝 키워 3표와 간격 좁힘 */
+          .report-a4-page .report-sheet table.report-table-rev th,
+          .report-a4-page .report-sheet table.report-table-rev td,
+          .report-tv-pt .report-sheet table.report-table-rev th,
+          .report-tv-pt .report-sheet table.report-table-rev td {
+            padding: 8px 9px !important;
+            line-height: 1.42 !important;
+          }
+          /* 입주예정: 입주(확정)·예정 열만 내용 높이 +30% 느낌 */
+          .report-a4-page .report-sheet .report-movein tbody td.report-movein-text-col,
+          .report-tv-pt .report-sheet .report-movein tbody td.report-movein-text-col {
+            min-height: 4.2em !important;
+            padding-top: 10px !important;
+            padding-bottom: 10px !important;
+            line-height: 1.38 !important;
+            vertical-align: top !important;
+          }
+          .report-a4-page .report-sheet .report-movein tbody td.report-movein-text-col .report-movein-cell-input,
+          .report-tv-pt .report-sheet .report-movein tbody td.report-movein-text-col .report-movein-cell-input {
+            min-height: 3.2em !important;
+            height: auto !important;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section {
+            flex: 0 0 auto !important;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 0 !important;
+          }
+          .report-a4-page .report-sheet .section .report-head-row,
+          .report-a4-page .report-sheet .section .section-title,
+          .report-a4-page .report-sheet .section > p,
+          .report-tv-pt .report-sheet .section .report-head-row,
+          .report-tv-pt .report-sheet .section .section-title,
+          .report-tv-pt .report-sheet .section > p {
+            flex-shrink: 0;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section:not(.report-movein-compact) table,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section:not(.report-movein-compact) table {
+            flex: 0 0 auto !important;
+            width: 100%;
+            height: auto !important;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-movein-compact table.report-movein,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-movein-compact table.report-movein {
+            flex: 0 0 auto !important;
+            height: auto !important;
+          }
+          .report-a4-page .report-sheet .section.report-table-section,
+          .report-tv-pt .report-sheet .section.report-table-section {
+            margin-top: 12px !important;
+            margin-bottom: 16px !important;
+            display: flex !important;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+          }
+          .report-a4-page .report-sheet .report-subhead,
+          .report-tv-pt .report-sheet .report-subhead {
+            margin-top: 32px !important;
+          }
+          /* 참고안: 1표↔2제목 약 1줄, 2표↔3제목 더 넓게(약 2줄) + 스페이서로 입주 블록 하단 정렬 */
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section:first-child,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section:first-child {
+            margin-top: 0 !important;
+            margin-bottom: 6px !important;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section:nth-child(2),
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section:nth-child(2) {
+            margin-top: 8px !important;
+            margin-bottom: 4px !important;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section:nth-child(2) .report-subhead,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section:nth-child(2) .report-subhead {
+            margin-top: 0 !important;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section.report-movein-compact,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section.report-movein-compact {
+            margin-top: 8px !important;
+            margin-bottom: 12px !important;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section:first-child .report-subhead,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section:first-child .report-subhead {
+            margin-top: 2px !important;
+          }
+          .report-a4-page .report-sheet .report-sheet-sections > .section.report-table-section.report-movein-compact .report-subhead,
+          .report-tv-pt .report-sheet .report-sheet-sections > .section.report-table-section.report-movein-compact .report-subhead {
+            margin-top: 0 !important;
+          }
+          /* 입주예정: 살짝 축소(zoom), 인쇄와 비슷한 비율 */
+          .report-a4-page .report-sheet .report-movein-zoom-wrap,
+          .report-tv-pt .report-sheet .report-movein-zoom-wrap {
+            width: 100%;
+            max-width: 100%;
+            zoom: 0.75;
+            box-sizing: border-box;
+          }
+          .report-a4-page .report-sheet .report-movein thead th,
+          .report-tv-pt .report-sheet .report-movein thead th {
+            padding: 10px 8px !important;
+            min-height: 2.6em !important;
+            line-height: 1.38 !important;
+            vertical-align: middle !important;
+          }
+          .report-a4-page .report-sheet .report-movein tbody tr:first-child td,
+          .report-tv-pt .report-sheet .report-movein tbody tr:first-child td {
+            padding-top: 15px !important;
+            padding-bottom: 15px !important;
+            min-height: 2.8em !important;
+            vertical-align: middle !important;
+          }
+          .report-a4-page .report-sheet .report-movein tbody tr:first-child td.report-movein-text-col,
+          .report-tv-pt .report-sheet .report-movein tbody tr:first-child td.report-movein-text-col {
+            min-height: 5.5em !important;
+            padding-top: 16px !important;
+            padding-bottom: 16px !important;
+            vertical-align: top !important;
+          }
         }
         @media print {
           .no-print { display: none !important; }
           @page {
             size: A4 landscape;
-            margin: 6mm 12mm;
+            margin: 5mm 5mm 5mm 5mm;
           }
           html, body {
-            background: #fff !important;
-            margin: 0 !important;
+            width: 297mm !important;
+            height: auto !important;
+            max-height: none !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+            font-size: 8.5pt !important;
+            margin: 0 auto !important;
             padding: 0 !important;
+            background: #fff !important;
+            display: block !important;
+            box-sizing: border-box !important;
             -webkit-print-color-adjust: exact !important;
             print-color-adjust: exact !important;
+          }
+          .report-a4-chrome {
+            width: 100% !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            background: #fff !important;
+            box-shadow: none !important;
+            border-radius: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: stretch !important;
+            justify-content: flex-start !important;
+            flex: 0 0 auto !important;
+            box-sizing: border-box !important;
+          }
+          .report-a4-page {
+            width: 100% !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            box-shadow: none !important;
+            background: transparent !important;
+            display: flex !important;
+            flex-direction: column !important;
+            flex: 0 0 auto !important;
+            box-sizing: border-box !important;
+          }
+          .report-sheet-outer {
+            width: 100% !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-height: none !important;
+            overflow: visible !important;
+            flex: 0 0 auto !important;
+            display: flex !important;
+            flex-direction: column !important;
+            box-sizing: border-box !important;
           }
           .report-sheet, .report-sheet * {
             -webkit-print-color-adjust: exact !important;
@@ -1786,41 +2377,149 @@ function ReportView({ data }) {
           .report-sheet {
             max-width: none !important;
             width: 100% !important;
+            height: auto !important;
+            max-height: none !important;
             margin: 0 !important;
-            padding: 0 !important;
+            padding: 6px 8px !important;
             box-sizing: border-box !important;
             background: #fff !important;
-            zoom: 1 !important;
+            box-shadow: none !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: flex-start !important;
+            flex: 0 0 auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
           }
-          .report-sheet h1 {
-            font-size: 14pt !important;
-            margin: 0 0 4pt !important;
-            letter-spacing: 1px !important;
-            line-height: 1.2 !important;
+          .report-sheet-sections {
+            flex: 1 1 auto !important;
+            min-height: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
           }
-          .report-sheet .report-head-row {
-            margin-bottom: 3pt !important;
+          .report-sheet .report-sheet-vertical-spacer {
+            display: none !important;
+            flex: 0 0 0 !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            width: 100% !important;
           }
-          .report-sheet > b {
-            font-size: 10pt !important;
-            margin: 5pt 0 3pt !important;
-            display: block !important;
+          .report-sheet .report-sheet-sections > .section.report-table-section {
+            flex: 0 0 auto !important;
+            min-height: 0 !important;
+            margin-bottom: 0 !important;
+            padding: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
+          }
+          .report-sheet .section .report-head-row,
+          .report-sheet .section .section-title,
+          .report-sheet .section > p {
+            flex-shrink: 0 !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-table-section:not(.report-movein-compact) table {
+            flex: 0 0 auto !important;
+            min-height: 0 !important;
+            width: 100% !important;
+            height: auto !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-movein-compact table.report-movein {
+            flex: 0 0 auto !important;
+            min-height: 0 !important;
+            width: 100% !important;
+            height: auto !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-table-section:first-child {
+            margin-top: 0 !important;
+            margin-bottom: 6px !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-table-section:nth-child(2) {
+            margin-top: 8px !important;
+            margin-bottom: 4px !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-table-section:nth-child(2) .report-subhead {
+            margin-top: 0 !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-table-section.report-movein-compact {
+            margin-top: 6px !important;
+            margin-bottom: 8px !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-table-section:first-child .report-subhead {
+            margin-top: 2px !important;
+          }
+          .report-sheet .report-sheet-sections > .section.report-table-section.report-movein-compact .report-subhead {
+            margin-top: 0 !important;
+          }
+          .report-sheet .report-movein-zoom-wrap {
+            width: 100% !important;
+            max-width: 100% !important;
+            zoom: 0.75 !important;
+            box-sizing: border-box !important;
+          }
+          .report-sheet table.report-table-rev th,
+          .report-sheet table.report-table-rev td {
+            padding: 7px 8px !important;
+            line-height: 1.42 !important;
+            font-size: 8pt !important;
+          }
+          .report-sheet .report-movein tbody td.report-movein-text-col {
+            min-height: 3.9em !important;
+            padding-top: 11px !important;
+            padding-bottom: 11px !important;
+            line-height: 1.38 !important;
+            vertical-align: top !important;
+            font-size: 8pt !important;
+          }
+          .report-sheet .report-movein tbody td.report-movein-text-col .report-movein-cell-input {
+            min-height: 3.4em !important;
+            height: auto !important;
+            font-size: 8pt !important;
+            line-height: 1.35 !important;
+          }
+          .report-sheet h1.title,
+          .report-sheet h1,
+          .report-sheet h2,
+          .report-sheet .title {
+            font-size: 12pt !important;
+            margin: 0 !important;
+            letter-spacing: 0.5px !important;
+            line-height: 1.15 !important;
+            flex-shrink: 0 !important;
+          }
+          .report-sheet .section-title,
+          .report-sheet .report-head-row.section-title {
+            font-size: 9pt !important;
+            margin: 2px 0 !important;
+          }
+          .report-sheet .report-head-row.section-title b,
+          .report-sheet .section-title {
+            font-size: 9pt !important;
           }
           .report-sheet table {
             width: 100% !important;
             table-layout: fixed !important;
             border-collapse: collapse !important;
             font-size: 8pt !important;
-            margin-bottom: 4pt !important;
+            page-break-inside: auto !important;
+            break-inside: auto !important;
           }
+          .report-sheet table.report-table-main,
+          .report-sheet table.report-table-rev,
           .report-sheet table.report-movein {
-            margin-bottom: 2pt !important;
+            margin-bottom: 0 !important;
+          }
+          .report-sheet table tbody tr {
+            height: 1% !important;
           }
           .report-sheet th,
           .report-sheet td {
-            padding: 5px 5px !important;
+            padding: 4px 6px !important;
+            font-size: 8pt !important;
+            line-height: 1.25 !important;
             vertical-align: middle !important;
-            line-height: 1.38 !important;
           }
           .report-sheet th {
             white-space: normal !important;
@@ -1828,21 +2527,69 @@ function ReportView({ data }) {
             overflow-wrap: break-word !important;
           }
           .report-sheet td {
-            white-space: nowrap !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: keep-all !important;
+          }
+          .report-sheet table.report-table-main th,
+          .report-sheet table.report-table-main td {
+            padding: 7px 8px !important;
+            line-height: 1.42 !important;
+          }
+          .report-sheet table.report-table-main td.report-daewon-label {
+            padding: 7px 8px !important;
+            line-height: 1.42 !important;
+          }
+          .report-sheet td.report-daewon-label {
+            white-space: normal !important;
+            word-break: keep-all !important;
+            vertical-align: middle !important;
+            line-height: 1.25 !important;
+            padding: 4px 6px !important;
+          }
+          .report-sheet .report-movein-cell-input {
+            border: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            background: transparent !important;
+            -webkit-appearance: none !important;
+            appearance: none !important;
+            resize: none !important;
+            font-size: 8pt !important;
           }
           .report-sheet .report-movein th,
           .report-sheet .report-movein td {
             white-space: normal !important;
             word-wrap: break-word !important;
             overflow-wrap: break-word !important;
-            vertical-align: top !important;
+            vertical-align: middle !important;
             font-size: 8pt !important;
+            line-height: 1.25 !important;
+            padding: 4px 6px !important;
+          }
+          /* 입주예정: 헤더행 + 첫 데이터행(구분 열 1행) 높이 약 +40% */
+          .report-sheet .report-movein thead th {
+            padding: 10px 8px !important;
+            min-height: 2.6em !important;
             line-height: 1.38 !important;
-            padding: 5px 5px !important;
+            vertical-align: middle !important;
+          }
+          .report-sheet .report-movein tbody tr:first-child td {
+            padding-top: 15px !important;
+            padding-bottom: 15px !important;
+            min-height: 2.8em !important;
+            vertical-align: middle !important;
+          }
+          .report-sheet .report-movein tbody tr:first-child td.report-movein-text-col {
+            min-height: 5.5em !important;
+            padding-top: 16px !important;
+            padding-bottom: 16px !important;
+            vertical-align: top !important;
           }
           .report-sheet p {
             font-size: 8pt !important;
-            margin: 3pt 0 4pt !important;
+            margin: 1px 0 2px !important;
+            line-height: 1.25 !important;
           }
         }
         .report-tv-pt h1 { font-size: clamp(22px, 2.75vw, 32px) !important; margin-bottom: 14px !important; }
@@ -1860,6 +2607,22 @@ function ReportView({ data }) {
         }
         .report-tv-pt p { font-size: clamp(12px, 1.2vw, 15px) !important; }
         .report-tv-pt b { font-size: clamp(14px, 1.55vw, 18px) !important; }
+        /* PT 추가 보고: 이미지 뷰포트에 맞춰 꽉 채움(레터박스 없이 cover) */
+        .pt-slide-additional .ar-rich-prose p.ar-img-line {
+          margin: 6px 0 0 !important;
+          line-height: 0 !important;
+          width: 100% !important;
+        }
+        .pt-slide-additional .ar-rich-prose p.ar-img-line img {
+          width: 100% !important;
+          max-width: none !important;
+          height: calc(100vh - 120px) !important;
+          max-height: calc(100vh - 120px) !important;
+          object-fit: cover !important;
+          object-position: center !important;
+          display: block !important;
+          vertical-align: top !important;
+        }
       `}</style>
       {!ptMode ? (
         <div className="rp report-page-row">
@@ -1873,7 +2636,13 @@ function ReportView({ data }) {
             </button>
             <button type="button" onClick={() => window.print()} style={{ background: "#3b82f6", color: "#fff", border: "none", padding: "9px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700, width: "100%", boxSizing: "border-box" }}>🖨️ 인쇄</button>
           </div>
-          <div ref={sheetRef} className="report-sheet" style={{ ...sheetBaseStyle, flex: 1, minWidth: 0 }}>{reportInner}</div>
+          <div className="report-a4-chrome" style={{ flex: 1, minWidth: 0 }}>
+            <div className="report-a4-page">
+              <div className="report-sheet-outer">
+                <div ref={sheetRef} className="report-sheet" style={{ ...sheetBaseStyle, flex: 1, minWidth: 0, margin: 0 }}>{reportInner}</div>
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
         <div
@@ -1884,12 +2653,12 @@ function ReportView({ data }) {
             position: "fixed",
             inset: 0,
             zIndex: 99999,
-            background: "linear-gradient(180deg,#0f172a 0%,#020617 100%)",
+            background: "#ffffff",
             overflow: "hidden",
             boxSizing: "border-box",
           }}
         >
-          <div style={{ position: "absolute", inset: 0, zIndex: 0, minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column", alignItems: "stretch", justifyContent: "center" }}>
+          <div style={{ position: "absolute", inset: 0, zIndex: 0, minWidth: 0, overflow: "hidden", display: "flex", flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start" }}>
             <div
               className="pt-slide-track"
               style={{
@@ -1903,8 +2672,8 @@ function ReportView({ data }) {
                 willChange: "transform",
               }}
             >
-              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", boxSizing: "border-box", padding: "0 12px" }}>
-                <div ref={ptWrapRef} style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
+              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "flex-start", alignItems: "stretch", boxSizing: "border-box", padding: 0 }}>
+                <div ref={ptWrapRef} style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, width: "100%", display: "flex", flexDirection: "column", alignItems: "stretch" }}>
                   <div ref={sheetRef} className="rp report-sheet report-tv-pt" style={sheetPtStyle}>{reportInner}</div>
                   <canvas
                     className="no-print"
@@ -1934,9 +2703,9 @@ function ReportView({ data }) {
                   />
                 </div>
               </div>
-              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", boxSizing: "border-box", padding: "0 12px" }}>
-                <div ref={ptWrapAdditionalRef} style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
-                  <div className="rp report-tv-pt" style={{ ...sheetPtStyle, boxShadow: "0 8px 48px rgba(0,0,0,.35)" }}>
+              <div className="pt-slide-page" style={{ width: "50%", height: "100%", flexShrink: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "flex-start", alignItems: "stretch", boxSizing: "border-box", padding: 0 }}>
+                <div ref={ptWrapAdditionalRef} style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, width: "100%", display: "flex", flexDirection: "column", alignItems: "stretch" }}>
+                  <div className="rp report-tv-pt pt-slide-additional" style={sheetPtAdditionalStyle}>
                     <style>{RICH_PROSE_CSS}</style>
                     <h2 style={{ textAlign: "center", fontSize: 22, fontWeight: 800, marginTop: 0, marginBottom: 8, letterSpacing: 1, color: "#0f172a" }}>추가 보고</h2>
                     <p style={{ textAlign: "center", fontSize: 13, color: "#64748b", margin: "0 0 16px" }}>
